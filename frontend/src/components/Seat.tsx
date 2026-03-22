@@ -1,0 +1,261 @@
+import { useEffect, useState } from 'react';
+import type { GameCard, PokerGamePhase, SanitizedPlayer } from '../types/game';
+
+const ACTING_DURATION_MS = 60_000;
+const RING_R = 34;
+const RING_STROKE = 3;
+const RING_C = 2 * Math.PI * RING_R;
+
+function cardLabel(c: GameCard): string {
+  const s =
+    c.suit === 'HEARTS'
+      ? '♥'
+      : c.suit === 'DIAMONDS'
+        ? '♦'
+        : c.suit === 'CLUBS'
+          ? '♣'
+          : '♠';
+  return `${c.rank}${s}`;
+}
+
+function PlayingCardBack({ small }: { small?: boolean }) {
+  const cls = small ? 'h-8 w-5 text-[8px]' : 'h-9 w-6 text-[9px]';
+  return (
+    <div
+      className={`flex shrink-0 items-center justify-center rounded border border-indigo-400/50 bg-gradient-to-br from-indigo-900 to-slate-900 font-bold text-indigo-200/90 shadow-inner ${cls}`}
+      aria-hidden
+    >
+      ♠
+    </div>
+  );
+}
+
+function PlayingCardFace({ card, small }: { card: GameCard; small?: boolean }) {
+  const red = card.suit === 'HEARTS' || card.suit === 'DIAMONDS';
+  const cls = small ? 'h-8 w-5 text-[10px]' : 'h-9 w-6 text-[11px]';
+  return (
+    <div
+      className={`flex shrink-0 flex-col items-center justify-center rounded border border-white/20 bg-white font-semibold leading-none shadow ${cls} ${red ? 'text-red-600' : 'text-slate-900'}`}
+    >
+      {cardLabel(card)}
+    </div>
+  );
+}
+
+function ActingRing({
+  active,
+  startedAt,
+}: {
+  active: boolean;
+  startedAt: number | null;
+}) {
+  const [, setTick] = useState(0);
+
+  useEffect(() => {
+    if (!active || !startedAt) return;
+    const id = window.setInterval(() => setTick((n) => n + 1), 100);
+    return () => window.clearInterval(id);
+  }, [active, startedAt]);
+
+  if (!active || !startedAt) return null;
+
+  const elapsed = Date.now() - startedAt;
+  const remaining = Math.max(0, ACTING_DURATION_MS - elapsed);
+  const frac = remaining / ACTING_DURATION_MS;
+  const dash = RING_C * frac;
+  const urgent = remaining <= 10_000;
+
+  const strokeColor = urgent
+    ? '#f87171'
+    : remaining <= 30_000
+      ? '#fbbf24'
+      : '#34d399';
+
+  return (
+    <svg
+      className={`pointer-events-none absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 ${urgent ? 'animate-pulse' : ''}`}
+      width={88}
+      height={88}
+      aria-hidden
+    >
+      <circle
+        cx={44}
+        cy={44}
+        r={RING_R}
+        fill="none"
+        stroke="rgba(255,255,255,0.12)"
+        strokeWidth={RING_STROKE}
+      />
+      <circle
+        cx={44}
+        cy={44}
+        r={RING_R}
+        fill="none"
+        stroke={strokeColor}
+        strokeWidth={RING_STROKE}
+        strokeLinecap="round"
+        strokeDasharray={`${dash} ${RING_C}`}
+        transform="rotate(-90 44 44)"
+        style={{ transition: 'stroke 0.2s ease' }}
+      />
+    </svg>
+  );
+}
+
+export interface SeatProps {
+  /** 1..10 展示号 */
+  seatNumber: number;
+  position: { topPct: number; leftPct: number };
+  occupant: SanitizedPlayer | null;
+  isSelf: boolean;
+  isDealer: boolean;
+  isActing: boolean;
+  gamePhase: PokerGamePhase | null;
+  /** 空位时可执行：入座或换座 */
+  emptySeatAction?: 'sit' | 'move';
+  onSitDown: (seatIndex: number) => void;
+  onSeatOccupied: () => void;
+}
+
+export function Seat({
+  seatNumber,
+  position,
+  occupant,
+  isSelf,
+  isDealer,
+  isActing,
+  gamePhase,
+  emptySeatAction,
+  onSitDown,
+  onSeatOccupied,
+}: SeatProps) {
+  const [actingStartedAt, setActingStartedAt] = useState<number | null>(null);
+
+  useEffect(() => {
+    if (isActing) {
+      setActingStartedAt(Date.now());
+    } else {
+      setActingStartedAt(null);
+    }
+  }, [isActing]);
+
+  const handleSitClick = () => {
+    if (occupant) {
+      onSeatOccupied();
+      return;
+    }
+    if (!emptySeatAction) return;
+    onSitDown(seatNumber - 1);
+  };
+
+  const inStreetPhase =
+    gamePhase === 'PRE_FLOP' ||
+    gamePhase === 'FLOP' ||
+    gamePhase === 'TURN' ||
+    gamePhase === 'RIVER';
+
+  const stillInPot =
+    occupant &&
+    occupant.status !== 'FOLDED' &&
+    occupant.status !== 'SITTING_OUT';
+
+  const showRealCards =
+    !!(
+      occupant?.holeCards &&
+      (isSelf ||
+        gamePhase === 'SHOWDOWN' ||
+        gamePhase === 'FINAL_HAND')
+    );
+
+  const showBacks =
+    !!(
+      occupant &&
+      stillInPot &&
+      !showRealCards &&
+      !isSelf &&
+      inStreetPhase
+    );
+
+  const initial = occupant?.nickname?.charAt(0)?.toUpperCase() ?? '?';
+
+  return (
+    <div
+      className="absolute z-10 w-[4.5rem] -translate-x-1/2 -translate-y-1/2 sm:w-[5rem]"
+      style={{ left: `${position.leftPct}%`, top: `${position.topPct}%` }}
+    >
+      <div
+        className={`relative flex flex-col items-center gap-1 ${
+          isActing ? 'drop-shadow-[0_0_12px_rgba(52,211,153,0.85)]' : ''
+        }`}
+      >
+        <ActingRing active={isActing} startedAt={actingStartedAt} />
+
+        <div className="relative">
+          {occupant ? (
+            <>
+              <div
+                className={`flex h-12 w-12 items-center justify-center rounded-full border-2 text-lg font-bold shadow-lg sm:h-14 sm:w-14 ${
+                  isActing
+                    ? 'border-emerald-400 bg-emerald-900/80 ring-2 ring-emerald-400/60'
+                    : 'border-white/25 bg-gradient-to-br from-slate-600 to-slate-800'
+                }`}
+              >
+                {initial}
+              </div>
+              {isDealer ? (
+                <span
+                  className="absolute -bottom-0.5 -right-0.5 flex h-5 w-5 items-center justify-center rounded-full border border-amber-200 bg-amber-500 text-[10px] font-black text-amber-950 shadow"
+                  title="庄家"
+                >
+                  D
+                </span>
+              ) : null}
+            </>
+          ) : emptySeatAction ? (
+            <button
+              type="button"
+              onClick={handleSitClick}
+              className="rounded-full border border-dashed border-emerald-400/50 bg-emerald-950/40 px-2 py-2 text-[10px] font-medium text-emerald-200/90 hover:bg-emerald-900/50 sm:text-xs"
+            >
+              {emptySeatAction === 'move' ? '换座' : '坐下'}
+            </button>
+          ) : (
+            <div
+              className="flex h-12 w-12 items-center justify-center rounded-full border border-white/10 bg-black/20 sm:h-14 sm:w-14"
+              aria-hidden
+            />
+          )}
+        </div>
+
+        {occupant ? (
+          <>
+            <div className="max-w-full truncate text-center text-[10px] font-medium text-white/90 sm:text-xs">
+              {occupant.nickname}
+            </div>
+            <div className="font-mono text-[10px] text-amber-200/90 sm:text-[11px]">
+              {occupant.stack}
+            </div>
+            {occupant.status === 'FOLDED' ? (
+              <span className="text-[9px] text-red-400/80">已弃牌</span>
+            ) : null}
+            <div className="flex gap-0.5">
+              {showRealCards && occupant.holeCards ? (
+                <>
+                  <PlayingCardFace card={occupant.holeCards[0]} small />
+                  <PlayingCardFace card={occupant.holeCards[1]} small />
+                </>
+              ) : showBacks ? (
+                <>
+                  <PlayingCardBack small />
+                  <PlayingCardBack small />
+                </>
+              ) : null}
+            </div>
+          </>
+        ) : (
+          <span className="text-[9px] text-white/35">#{seatNumber}</span>
+        )}
+      </div>
+    </div>
+  );
+}
