@@ -1,21 +1,30 @@
 import { randomUUID } from 'node:crypto';
 import { hashRoomPassword, verifyRoomPassword } from '../auth/roomPassword.js';
 import { PokerEngine } from '../engine/PokerEngine.js';
+import {
+  clipPlayerNickname,
+  resolvedNicknameForSitDown,
+} from '../util/playerNickname.js';
+import { solveHoldem } from '../engine/handEvaluator.js';
 import type { Player } from '../types/poker.js';
 import { ActionType, GameState, PlayerStatus } from '../types/poker.js';
 import type {
   EngineGameStateSnapshot,
   LastHandSettlementView,
+  SettlementPlayerView,
 } from './interfaces.js';
 
 /** 与前端 `TABLE_SEAT_COUNT` 对齐 */
 export const ROOM_MAX_TABLE_PLAYERS = 10;
 
 /** PRD 托管：轮到行动后等待时长（毫秒） */
-export const ROOM_ACTION_TIMEOUT_MS = 60_000;
+export const ROOM_ACTION_TIMEOUT_MS = 30_000;
 
 /** 房主断线超过该时间未重连则转移房主（PRD 断线/管理） */
 export const HOST_TRANSFER_TIMEOUT_MS = 30_000;
+
+/** 结算弹窗展示后自动开下一手（毫秒） */
+export const ROOM_AUTO_NEXT_HAND_AFTER_SETTLEMENT_MS = 10_000;
 
 export interface RoomCreateOptions {
   roomId: string;
@@ -46,7 +55,7 @@ export interface ApprovedBuyInCredit {
 }
 
 /**
- * 单房间：引擎、连接映射、行动托管计时、买入审批与延迟入账（PRD §3.8 / §3.3）。
+ * 单房间：引擎、连接映射、行动托管计时、买入审批（批准后即时入账 stack；下一手开桌前仍会清空待入账队列，通常为空）。
  */
 export type HostTransferredEvent = {
   roomId: string;
@@ -69,6 +78,11 @@ export class Room {
   private approvedBuyInsPendingCredit: ApprovedBuyInCredit[] = [];
   /** 会话累计买入（含开局初始 stack 视为首次买入） */
   private readonly totalBuyInRecorded = new Map<string, number>();
+  /** 已站起围观、不在引擎座位上的玩家，供 game_ended 战绩合并 */
+  private readonly stoodUpPlayersForSettlement = new Map<
+    string,
+    { playerId: string; nickname: string; finalStack: number; totalBuyIn: number }
+  >();
   /** PRD §3.8：最后一手阶段内拒绝新买入（已排队待审的仍可由房主处理） */
   private isFinalHand = false;
   private actionTimer: ReturnType<typeof setTimeout> | null = null;
@@ -76,8 +90,6 @@ export class Room {
   private actionDeadlineAtMs: number | null = null;
   private hostTransferTimer: ReturnType<typeof setTimeout> | null = null;
   private handPotDistributed = false;
-  /** 分池完成后待自动开下一手（至少两人在线时由 handler 消费） */
-  private pendingAutoStartNextHand = false;
   /** 上一手分池结果（供单局结算 UI）；`startNextHand` 时清空 */
   private lastHandSettlement: LastHandSettlementView | null = null;
   /** 已成功发牌开局的次数（0 = 尚未开过第一手） */
@@ -87,13 +99,18 @@ export class Room {
   private joinPwdHash?: string;
   private joinPasswordRevision: number;
   private roomDisplayName: string;
+  private autoNextHandTimer: ReturnType<typeof setTimeout> | null = null;
+  private readonly onRoomStateChanged?: (room: Room) => void;
 
   constructor(
-    opts: RoomCreateOptions & { onHostTransferred?: (e: HostTransferredEvent) => void },
+    opts: RoomCreateOptions & {
+      onHostTransferred?: (e: HostTransferredEvent) => void;
+      onRoomStateChanged?: (room: Room) => void;
+    },
   ) {
     this.roomId = opts.roomId;
     this._hostPlayerId = opts.hostPlayerId;
-    this.defaultStartingStack = opts.defaultStartingStack ?? 1000;
+    this.defaultStartingStack = opts.defaultStartingStack ?? 200;
     this.joinPwdSalt = opts.joinPasswordSalt;
     this.joinPwdHash = opts.joinPasswordHash;
     this.joinPasswordRevision =
@@ -103,6 +120,7 @@ export class Room {
         ? opts.displayName.trim()
         : `房间${opts.roomId.slice(-4)}`;
     this.onHostTransferred = opts.onHostTransferred;
+    this.onRoomStateChanged = opts.onRoomStateChanged;
     this.engine = new PokerEngine({
       players: opts.initialPlayers ?? [],
       dealerIndex: 0,
@@ -195,31 +213,6 @@ export class Room {
     return this.engine.getPlayers().map((p) => p.id);
   }
 
-  /** 当前在桌且已绑定 Socket 的人数 */
-  countConnectedAtTable(): number {
-    let n = 0;
-    for (const id of this.getTablePlayerIds()) {
-      if (this.playersConnectMap.has(id)) n++;
-    }
-    return n;
-  }
-
-  /**
-   * 两人均已 `join_room` 时自动开第一手（仅 `handsDealtCount === 0` 时生效）。
-   * @returns 是否已触发开局并发牌
-   */
-  tryAutoStartFirstHand(): boolean {
-    if (this.handsDealtCount > 0) return false;
-    if (this.countConnectedAtTable() < 2) return false;
-    if (this.isFinalHand) return false;
-    try {
-      this.startNextHand();
-      return true;
-    } catch {
-      return false;
-    }
-  }
-
   /**
    * 房主手动开桌：第一手任意时刻可开；之后仅当上一手已进入 Showdown 且已分池。
    */
@@ -245,34 +238,6 @@ export class Room {
     if (gs === GameState.FinalHand) return false;
     if (gs !== GameState.Showdown) return false;
     return this.handPotDistributed;
-  }
-
-  /**
-   * 上一手已分池且标记了自动续局时，在至少两人在线则立即 `startNextHand`。
-   * 不足两人时保留 pending，待对方 `join_room` 再调本方法。
-   * @returns 是否已执行 `startNextHand`（需再向客户端推快照）
-   */
-  /** 是否已分池且等待自动续局（供 handler 延迟调度） */
-  hasPendingAutoStartNextHand(): boolean {
-    return this.pendingAutoStartNextHand;
-  }
-
-  runAutoNextHandFromPending(): boolean {
-    if (!this.pendingAutoStartNextHand) return false;
-    if (this.isFinalHand) {
-      this.pendingAutoStartNextHand = false;
-      return false;
-    }
-    if (this.countConnectedAtTable() < 2) {
-      return false;
-    }
-    this.pendingAutoStartNextHand = false;
-    try {
-      this.startNextHand();
-      return true;
-    } catch {
-      return false;
-    }
   }
 
   getConnectedPlayerIdSet(): ReadonlySet<string> {
@@ -331,8 +296,7 @@ export class Room {
       return { ok: false, reason: 'INVALID_STACK' };
     }
 
-    const rawNick = opts.nickname?.trim();
-    const nickname = (rawNick && rawNick.length > 0 ? rawNick : playerId).slice(0, 32);
+    const nickname = resolvedNicknameForSitDown(opts.nickname, playerId);
 
     const player: Player = {
       id: playerId,
@@ -349,9 +313,36 @@ export class Room {
       if (msg === 'SEAT_OCCUPIED') return { ok: false, reason: 'SEAT_OCCUPIED' };
       return { ok: false, reason: msg || 'SIT_DOWN_FAILED' };
     }
+    this.stoodUpPlayersForSettlement.delete(playerId);
     this.totalBuyInRecorded.set(playerId, player.stack);
     this.ensureJoinedAt(playerId);
     return { ok: true, engineSeatIndex: seat };
+  }
+
+  /**
+   * 已上桌玩家修改展示昵称（任意阶段允许）。
+   */
+  updatePlayerNickname(
+    playerId: string,
+    rawNickname: unknown,
+  ): { ok: true } | { ok: false; reason: string } {
+    if (!this.getTablePlayerIds().includes(playerId)) {
+      return { ok: false, reason: 'NOT_AT_TABLE' };
+    }
+    if (typeof rawNickname !== 'string') {
+      return { ok: false, reason: 'INVALID_NICKNAME' };
+    }
+    const trimmed = rawNickname.trim();
+    if (trimmed.length === 0) {
+      return { ok: false, reason: 'INVALID_NICKNAME' };
+    }
+    const nickname = clipPlayerNickname(trimmed);
+    if (nickname.length === 0) {
+      return { ok: false, reason: 'INVALID_NICKNAME' };
+    }
+    const ok = this.engine.setPlayerNickname(playerId, nickname);
+    if (!ok) return { ok: false, reason: 'NOT_AT_TABLE' };
+    return { ok: true };
   }
 
   /**
@@ -479,6 +470,7 @@ export class Room {
       amount: req.amount,
       approvedAt: Date.now(),
     });
+    this.applyApprovedBuyInsToStacks();
     return { ok: true };
   }
 
@@ -522,6 +514,7 @@ export class Room {
       profit: number;
     }[];
   } {
+    const atTable = new Set(this.engine.getPlayers().map((p) => p.id));
     const rows = this.engine.getPlayers().map((p) => {
       const buy = this.totalBuyInRecorded.get(p.id) ?? 0;
       return {
@@ -532,14 +525,68 @@ export class Room {
         profit: p.stack - buy,
       };
     });
+    for (const s of this.stoodUpPlayersForSettlement.values()) {
+      if (atTable.has(s.playerId)) continue;
+      rows.push({
+        playerId: s.playerId,
+        nickname: s.nickname,
+        totalBuyIn: s.totalBuyIn,
+        finalStack: s.finalStack,
+        profit: s.finalStack - s.totalBuyIn,
+      });
+    }
     return { roomId: this.roomId, rows };
+  }
+
+  /**
+   * 站起围观：离开引擎座位、回到大厅连接映射；保留 `totalBuyInRecorded` 与离桌时筹码供最终结算。
+   */
+  standUpToLobby(
+    playerId: string,
+  ): { ok: true } | { ok: false; reason: string } {
+    if (!this.getTablePlayerIds().includes(playerId)) {
+      return { ok: false, reason: 'NOT_AT_TABLE' };
+    }
+    const timing = this.canReconfigureSeatPositionsNow();
+    if (!timing.ok) return timing;
+
+    const p = this.engine.getPlayers().find((x) => x.id === playerId);
+    if (!p) return { ok: false, reason: 'NOT_AT_TABLE' };
+
+    this.pendingBuyIns = this.pendingBuyIns.filter((r) => r.playerId !== playerId);
+
+    this.stoodUpPlayersForSettlement.set(playerId, {
+      playerId,
+      nickname: p.nickname,
+      finalStack: p.stack,
+      totalBuyIn: this.totalBuyInRecorded.get(playerId) ?? 0,
+    });
+
+    try {
+      this.engine.removePlayerFromTable(playerId);
+    } catch (e) {
+      this.stoodUpPlayersForSettlement.delete(playerId);
+      const msg = e instanceof Error ? e.message : 'REMOVE_FAILED';
+      return { ok: false, reason: msg };
+    }
+
+    if (this.engine.getPlayers().length === 0) {
+      this.handsDealtCount = 0;
+      this.lastHandSettlement = null;
+      this.handPotDistributed = false;
+      this.clearActionTimer();
+    } else {
+      this.refreshActionTimerAfterSeatChange();
+    }
+
+    return { ok: true };
   }
 
   /**
    * 新一手：`GameState` 随 `dealPreFlop` 重置为 PRE_FLOP；此时将审批通过的买入注入 stack。
    */
   startNextHand(): void {
-    this.pendingAutoStartNextHand = false;
+    this.clearAutoNextHandTimer();
     this.lastHandSettlement = null;
     const seated = this.engine
       .getPlayers()
@@ -581,6 +628,38 @@ export class Room {
       const nickById = new Map(
         this.engine.getPlayers().map((p) => [p.id, p.nickname] as const),
       );
+      const board = this.engine.getCommunityCards();
+      const settlementPlayers: SettlementPlayerView[] = this.engine
+        .getPlayers()
+        .map((p) => {
+          const folded =
+            p.status === PlayerStatus.Folded ||
+            p.status === PlayerStatus.SittingOut;
+          const holeRaw = this.engine.getHoleCardsForPlayer(p.id);
+          const holeCards =
+            folded || !holeRaw
+              ? null
+              : ([holeRaw[0], holeRaw[1]] as [typeof holeRaw[0], typeof holeRaw[1]]);
+          let handDescription: string | undefined;
+          if (!folded && holeRaw && board.length === 5) {
+            try {
+              const hand = solveHoldem(holeRaw, board) as {
+                descr?: string;
+                name?: string;
+              };
+              handDescription = hand.descr ?? hand.name;
+            } catch {
+              /* 牌张未齐等 */
+            }
+          }
+          return {
+            playerId: p.id,
+            nickname: p.nickname,
+            folded,
+            holeCards,
+            handDescription,
+          };
+        });
       this.lastHandSettlement = {
         handNumber: this.handsDealtCount,
         awards: rawAwards.map((a) => ({
@@ -589,10 +668,10 @@ export class Room {
           potLevel: a.potLevel,
           amount: a.amount,
         })),
+        communityCards: [...board],
+        settlementPlayers,
       };
-      if (!this.isFinalHand) {
-        this.pendingAutoStartNextHand = true;
-      }
+      this.scheduleAutoNextHandAfterSettlement();
     } catch {
       /* 牌桌未就绪时由外层处理；不标记已结算以便重试 */
     }
@@ -632,6 +711,50 @@ export class Room {
       return;
     }
     this.afterEngineStep();
+    this.notifyRoomStateChanged();
+  }
+
+  private notifyRoomStateChanged(): void {
+    this.onRoomStateChanged?.(this);
+  }
+
+  private clearAutoNextHandTimer(): void {
+    if (this.autoNextHandTimer != null) {
+      clearTimeout(this.autoNextHandTimer);
+      this.autoNextHandTimer = null;
+    }
+  }
+
+  private scheduleAutoNextHandAfterSettlement(): void {
+    this.clearAutoNextHandTimer();
+    if (this.isFinalHand) return;
+    if (!this.canAutoStartNextHand()) return;
+    this.autoNextHandTimer = setTimeout(() => {
+      this.autoNextHandTimer = null;
+      this.tryAutoStartNextHandAfterSettlement();
+    }, ROOM_AUTO_NEXT_HAND_AFTER_SETTLEMENT_MS);
+  }
+
+  /** 与手动「下一手」一致的前提：Showdown 且已分池、至少两人在座且有筹码 */
+  private canAutoStartNextHand(): boolean {
+    if (!this.handPotDistributed) return false;
+    if (this.engine.getGameState() !== GameState.Showdown) return false;
+    const seated = this.engine
+      .getPlayers()
+      .filter((p) => p.status !== PlayerStatus.SittingOut);
+    if (seated.length < 2) return false;
+    if (seated.filter((p) => p.stack > 0).length < 2) return false;
+    return true;
+  }
+
+  private tryAutoStartNextHandAfterSettlement(): void {
+    if (!this.canAutoStartNextHand()) return;
+    try {
+      this.startNextHand();
+      this.notifyRoomStateChanged();
+    } catch {
+      /* 人不够等：静默跳过 */
+    }
   }
 
   private clearActionTimer(): void {
@@ -714,5 +837,6 @@ export class Room {
   destroy(): void {
     this.clearActionTimer();
     this.clearHostTransferTimer();
+    this.clearAutoNextHandTimer();
   }
 }

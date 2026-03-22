@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import type { GameCard, PokerGamePhase, SanitizedPlayer } from '../types/game';
 
 const ACTING_DURATION_MS = 60_000;
@@ -134,6 +134,9 @@ export interface SeatProps {
   actionDeadlineAt: number | null;
   onSitDown: (seatIndex: number) => void;
   onSeatOccupied: () => void;
+  onSelfAvatarClick?: () => void;
+  /** 站起围观；与头像菜单一并展示 */
+  onSelfStandUp?: () => void;
 }
 
 export function Seat({
@@ -148,8 +151,22 @@ export function Seat({
   actionDeadlineAt,
   onSitDown,
   onSeatOccupied,
+  onSelfAvatarClick,
+  onSelfStandUp,
 }: SeatProps) {
   const [actingStartedAt, setActingStartedAt] = useState<number | null>(null);
+  const [selfMenuOpen, setSelfMenuOpen] = useState(false);
+  const selfMenuWrapRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!selfMenuOpen) return;
+    const onDoc = (e: MouseEvent) => {
+      const el = selfMenuWrapRef.current;
+      if (el && !el.contains(e.target as Node)) setSelfMenuOpen(false);
+    };
+    document.addEventListener('mousedown', onDoc);
+    return () => document.removeEventListener('mousedown', onDoc);
+  }, [selfMenuOpen]);
 
   useEffect(() => {
     if (isActing) {
@@ -223,15 +240,85 @@ export function Seat({
           <div className="relative z-[2]">
             {occupant ? (
               <>
-                <div
-                  className={`flex h-12 w-12 items-center justify-center rounded-full border-2 text-lg font-bold shadow-lg sm:h-14 sm:w-14 ${
-                    isActing
-                      ? 'border-emerald-400 bg-emerald-900/80 ring-2 ring-emerald-400/60'
-                      : 'border-white/25 bg-gradient-to-br from-slate-600 to-slate-800'
-                  }`}
-                >
-                  {initial}
-                </div>
+                {isSelf && onSelfStandUp ? (
+                  <div className="relative" ref={selfMenuWrapRef}>
+                    <button
+                      type="button"
+                      aria-label="座位菜单"
+                      aria-expanded={selfMenuOpen}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setSelfMenuOpen((o) => !o);
+                      }}
+                      className={`flex h-12 w-12 cursor-pointer items-center justify-center rounded-full border-2 text-lg font-bold shadow-lg transition hover:brightness-110 focus:outline-none focus:ring-2 focus:ring-emerald-400/70 sm:h-14 sm:w-14 ${
+                        isActing
+                          ? 'border-emerald-400 bg-emerald-900/80 ring-2 ring-emerald-400/60'
+                          : 'border-white/25 bg-gradient-to-br from-slate-600 to-slate-800'
+                      }`}
+                    >
+                      {initial}
+                    </button>
+                    {selfMenuOpen ? (
+                      <div
+                        className="absolute left-1/2 top-full z-[40] mt-1 w-max min-w-[7.5rem] -translate-x-1/2 rounded-lg border border-white/15 bg-gray-950/98 py-1 shadow-xl backdrop-blur-sm"
+                        role="menu"
+                      >
+                        {onSelfAvatarClick ? (
+                          <button
+                            type="button"
+                            role="menuitem"
+                            className="block w-full px-3 py-2 text-left text-[11px] font-medium text-white/90 hover:bg-white/10"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              setSelfMenuOpen(false);
+                              onSelfAvatarClick();
+                            }}
+                          >
+                            修改昵称
+                          </button>
+                        ) : null}
+                        <button
+                          type="button"
+                          role="menuitem"
+                          className="block w-full px-3 py-2 text-left text-[11px] font-medium text-amber-100/95 hover:bg-white/10"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            setSelfMenuOpen(false);
+                            onSelfStandUp();
+                          }}
+                        >
+                          站起围观
+                        </button>
+                      </div>
+                    ) : null}
+                  </div>
+                ) : isSelf && onSelfAvatarClick ? (
+                  <button
+                    type="button"
+                    aria-label="修改昵称"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      onSelfAvatarClick();
+                    }}
+                    className={`flex h-12 w-12 cursor-pointer items-center justify-center rounded-full border-2 text-lg font-bold shadow-lg transition hover:brightness-110 focus:outline-none focus:ring-2 focus:ring-emerald-400/70 sm:h-14 sm:w-14 ${
+                      isActing
+                        ? 'border-emerald-400 bg-emerald-900/80 ring-2 ring-emerald-400/60'
+                        : 'border-white/25 bg-gradient-to-br from-slate-600 to-slate-800'
+                    }`}
+                  >
+                    {initial}
+                  </button>
+                ) : (
+                  <div
+                    className={`flex h-12 w-12 items-center justify-center rounded-full border-2 text-lg font-bold shadow-lg sm:h-14 sm:w-14 ${
+                      isActing
+                        ? 'border-emerald-400 bg-emerald-900/80 ring-2 ring-emerald-400/60'
+                        : 'border-white/25 bg-gradient-to-br from-slate-600 to-slate-800'
+                    }`}
+                  >
+                    {initial}
+                  </div>
+                )}
                 {isDealer ? (
                   <span
                     className="absolute -bottom-0.5 -right-0.5 flex h-5 w-5 items-center justify-center rounded-full border border-amber-200 bg-amber-500 text-[10px] font-black text-amber-950 shadow"

@@ -105,7 +105,7 @@ export function mountApiRoutes(app: Express, roomManager: RoomManager): void {
         {
           id: playerId,
           nickname: displayName,
-          stack: 1000,
+          stack: 200,
           bet: 0,
           status: PlayerStatus.Alive,
           seatIndex: 0,

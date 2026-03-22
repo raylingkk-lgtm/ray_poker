@@ -3,6 +3,7 @@
  */
 
 export type PokerGamePhase =
+  | 'IDLE'
   | 'PRE_FLOP'
   | 'FLOP'
   | 'TURN'
@@ -47,9 +48,19 @@ export interface HandPotAwardView {
   amount: number;
 }
 
+export interface SettlementPlayerView {
+  playerId: string;
+  nickname: string;
+  folded: boolean;
+  holeCards: readonly [GameCard, GameCard] | null;
+  handDescription?: string;
+}
+
 export interface LastHandSettlementView {
   handNumber: number;
   awards: readonly HandPotAwardView[];
+  communityCards: readonly GameCard[];
+  settlementPlayers: readonly SettlementPlayerView[];
 }
 
 export interface SanitizedGameState {
@@ -90,6 +101,8 @@ export type PlayerActionKind =
 export const SocketClientEvent = {
   JoinRoom: 'join_room',
   SitDown: 'sit_down',
+  StandUp: 'stand_up',
+  UpdateNickname: 'update_nickname',
   PlayerAction: 'player_action',
   RequestBuyIn: 'request_buy_in',
   AdminControl: 'admin_control',
@@ -146,6 +159,15 @@ export interface SitDownPayload {
   seatIndex: number;
   nickname?: string;
   stack?: number;
+}
+
+export interface StandUpPayload {
+  roomId: string;
+}
+
+export interface UpdateNicknamePayload {
+  roomId: string;
+  nickname: string;
 }
 
 export interface PlayerActionPayload {

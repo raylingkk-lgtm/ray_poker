@@ -15,6 +15,14 @@ import { Toast } from '../components/Toast';
 import { useGameSocket } from '../hooks/useGameSocket';
 import { getApiBase } from '../lib/apiBase';
 import { formatGamePhase, totalPotAmount } from '../lib/gameLabels';
+import {
+  clipPlayerNickname,
+  getStoredPlayerNickname,
+  MAX_PLAYER_NICKNAME_CODEPOINTS,
+  nicknameForSitDownPayload,
+  playerNicknameCodePointLength,
+  setStoredPlayerNickname,
+} from '../lib/playerNickname';
 import { PENDING_ROOM_PASSWORD_KEY } from '../lib/roomJoin';
 import {
   clearStoredRoomPassword,
@@ -94,6 +102,8 @@ export function GameRoom({
   const [hostPwdDraft, setHostPwdDraft] = useState('');
   const [hostPwdBusy, setHostPwdBusy] = useState(false);
   const [hostPwdClear, setHostPwdClear] = useState(false);
+  const [nicknameModalOpen, setNicknameModalOpen] = useState(false);
+  const [nicknameDraft, setNicknameDraft] = useState('');
 
   const onSitDownAck = useCallback(
     (p: { ok?: boolean; message?: string }) => {
@@ -116,6 +126,17 @@ export function GameRoom({
     },
     [],
   );
+
+  const onStandUpAck = useCallback((p: { ok?: boolean; message?: string }) => {
+    if (p?.ok !== false) return;
+    const code = p.message ?? '';
+    const map: Record<string, string> = {
+      NOT_AT_TABLE: '你不在座位上',
+      SHOWDOWN_GAP_ONLY: '仅未开局或上一手分池后可站起围观',
+      FINAL_HAND_NO_SIT: '最后一手阶段不可站起',
+    };
+    setToast(map[code] ?? (code ? `站起失败：${code}` : '站起失败'));
+  }, []);
 
   const onRequestBuyInAck = useCallback(
     (p: { ok?: boolean; reason?: string }) => {
@@ -157,6 +178,8 @@ export function GameRoom({
     clearLastSocketError,
     lastSocketError,
     sitDown,
+    standUp,
+    updateNickname,
     sendPlayerAction,
     requestBuyIn,
     sendAdminControl,
@@ -165,9 +188,12 @@ export function GameRoom({
   } = useGameSocket({
     autoConnect: true,
     onSitDownAck,
+    onStandUpAck,
     onRequestBuyInAck,
     onAdminControlAck,
-    onAuthInvalid: onRenewSession,
+    onAuthInvalid: async () => {
+      await onRenewSession();
+    },
     onSocketToast: (msg) => setToast(msg),
   });
 
@@ -300,6 +326,45 @@ export function GameRoom({
     setMenuView('root');
   };
 
+  const openNicknameModal = useCallback(() => {
+    const stored = getStoredPlayerNickname(session.playerId).trim();
+    const atTableName = selfPlayer?.nickname?.trim() ?? '';
+    setNicknameDraft(stored || atTableName);
+    setNicknameModalOpen(true);
+  }, [selfPlayer?.nickname, session.playerId]);
+
+  const closeNicknameModal = useCallback(() => {
+    setNicknameModalOpen(false);
+  }, []);
+
+  const handleSaveNickname = useCallback(
+    (e: FormEvent) => {
+      e.preventDefault();
+      const trimmed = nicknameDraft.trim();
+      if (!trimmed) {
+        setToast('请填写昵称');
+        return;
+      }
+      if (playerNicknameCodePointLength(trimmed) > MAX_PLAYER_NICKNAME_CODEPOINTS) {
+        setToast(`昵称最多 ${MAX_PLAYER_NICKNAME_CODEPOINTS} 个字`);
+        return;
+      }
+      const clipped = clipPlayerNickname(trimmed);
+      setStoredPlayerNickname(session.playerId, clipped);
+      if (isSeatedAtTable) {
+        updateNickname({ roomId, nickname: clipped });
+      }
+      setNicknameModalOpen(false);
+    },
+    [
+      nicknameDraft,
+      session.playerId,
+      isSeatedAtTable,
+      roomId,
+      updateNickname,
+    ],
+  );
+
   const handleRequestBuyIn = () => {
     if (!gameState) {
       setToast('尚未同步房间状态');
@@ -390,6 +455,11 @@ export function GameRoom({
   const showHandSettlementModal =
     lastHandSettlement !== null &&
     lastHandSettlement.handNumber !== dismissedSettlementHandNo;
+
+  const dismissHandSettlement = useCallback(() => {
+    const s = gameState?.lastHandSettlement;
+    if (s) setDismissedSettlementHandNo(s.handNumber);
+  }, [gameState?.lastHandSettlement?.handNumber]);
 
   return (
     <div className="flex h-screen w-screen flex-col overflow-hidden bg-gray-900 text-white">
@@ -675,6 +745,13 @@ export function GameRoom({
               你正在<strong className="mx-1">旁观</strong>：请点击桌上虚线空位的
               <strong className="mx-1">「坐下」</strong>
               加入牌局。
+              <button
+                type="button"
+                onClick={openNicknameModal}
+                className="mt-1 block w-full text-center text-[11px] text-emerald-300/95 underline decoration-emerald-400/50 hover:text-emerald-200"
+              >
+                设置显示名（入座时默认使用）
+              </button>
             </div>
           ) : null}
           {connectionStatus === 'connected' &&
@@ -686,8 +763,22 @@ export function GameRoom({
               className="mb-2 rounded-lg border border-sky-400/30 bg-sky-950/40 px-3 py-2 text-center text-[11px] leading-snug text-sky-100/95"
               role="status"
             >
-              等待<strong className="mx-1">至少两位玩家在座且在线</strong>
-              后将自动发第一手。也可请房主在菜单里点「开始 / 下一手牌」。
+              至少需要<strong className="mx-1">两位玩家在座且在线</strong>
+              后，请<strong className="mx-1">房主</strong>在菜单里点「开始 / 下一手牌」发第一手。
+            </div>
+          ) : null}
+          {connectionStatus === 'connected' &&
+          gameState &&
+          isSeatedAtTable &&
+          handsDealtCount === 0 &&
+          onlineAtTable >= 2 ? (
+            <div
+              className="mb-2 rounded-lg border border-emerald-500/25 bg-emerald-950/40 px-3 py-2 text-center text-[11px] leading-snug text-emerald-100/95"
+              role="status"
+            >
+              {isHost
+                ? '请点击右上角菜单中的「开始 / 下一手牌」发第一手。'
+                : '人已齐，等待房主在菜单中点击「开始 / 下一手牌」。'}
             </div>
           ) : null}
           <PokerTable
@@ -695,8 +786,17 @@ export function GameRoom({
             selfPlayerId={selfPlayerId}
             roomId={roomId}
             isSeatedAtTable={isSeatedAtTable}
-            onSitDown={(seatIndex) => sitDown({ roomId, seatIndex })}
+            onSitDown={(seatIndex) => {
+              const nick = nicknameForSitDownPayload(session.playerId);
+              sitDown({
+                roomId,
+                seatIndex,
+                ...(nick ? { nickname: nick } : {}),
+              });
+            }}
             onSeatOccupied={() => setToast('该位置已被占用')}
+            onSelfAvatarClick={openNicknameModal}
+            onSelfStandUp={() => standUp({ roomId })}
           />
         </div>
       </main>
@@ -713,10 +813,7 @@ export function GameRoom({
       {showHandSettlementModal && lastHandSettlement ? (
         <HandSettlementModal
           settlement={lastHandSettlement}
-          communityCards={gameState?.communityCards ?? []}
-          onDismiss={() =>
-            setDismissedSettlementHandNo(lastHandSettlement.handNumber)
-          }
+          onDismiss={dismissHandSettlement}
         />
       ) : null}
       {gameEndedPayload ? (
@@ -785,6 +882,54 @@ export function GameRoom({
                 className="rounded-lg bg-emerald-600 px-4 py-2 text-sm font-medium text-white hover:bg-emerald-500"
               >
                 进入
+              </button>
+            </div>
+          </form>
+        </div>
+      ) : null}
+
+      {nicknameModalOpen ? (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="nickname-modal-title"
+        >
+          <form
+            onSubmit={handleSaveNickname}
+            className="w-full max-w-sm rounded-xl border border-white/10 bg-gray-900 p-4 shadow-xl"
+          >
+            <h2
+              id="nickname-modal-title"
+              className="text-base font-medium text-white"
+            >
+              我的显示名
+            </h2>
+            <p className="mt-1 text-xs text-white/50">
+              全桌可见；最多 {MAX_PLAYER_NICKNAME_CODEPOINTS} 个字。已入座时保存后立即同步。
+            </p>
+            <input
+              type="text"
+              autoComplete="nickname"
+              value={nicknameDraft}
+              onChange={(e) => setNicknameDraft(e.target.value)}
+              className="mt-3 w-full rounded-lg border border-white/15 bg-white/5 px-3 py-2 text-sm text-white outline-none ring-emerald-500/40 focus:ring-2"
+              placeholder="例如：小王"
+              maxLength={MAX_PLAYER_NICKNAME_CODEPOINTS * 2}
+            />
+            <div className="mt-4 flex justify-end gap-2">
+              <button
+                type="button"
+                className="rounded-lg px-3 py-2 text-sm text-white/70 hover:bg-white/10"
+                onClick={closeNicknameModal}
+              >
+                取消
+              </button>
+              <button
+                type="submit"
+                className="rounded-lg bg-emerald-600 px-4 py-2 text-sm font-medium text-white hover:bg-emerald-500"
+              >
+                保存
               </button>
             </div>
           </form>

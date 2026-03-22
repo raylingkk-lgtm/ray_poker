@@ -44,12 +44,15 @@ export function solveHoldem(hole: readonly [Card, Card], board: readonly Card[])
   return Hand.solve(cardsToSolverStrings(seven), 'standard');
 }
 
+/**
+ * 摊牌胜者（含平分）：不被任一对手严格击败的玩家，等价于 pokersolver 的 winners，
+ * 但不依赖 `Hand.winners` 返回值与 `solve` 实例的引用相等。
+ */
 export function winningPlayerIdsFromHands(
   entries: readonly { playerId: string; hand: import('pokersolver').Hand }[],
 ): string[] {
   if (entries.length === 0) return [];
-  const hands = entries.map((e) => e.hand);
-  const winners = Hand.winners(hands);
-  const set = new Set(winners);
-  return entries.filter((e) => set.has(e.hand)).map((e) => e.playerId);
+  return entries
+    .filter((e) => !entries.some((other) => e.hand.loseTo(other.hand)))
+    .map((e) => e.playerId);
 }

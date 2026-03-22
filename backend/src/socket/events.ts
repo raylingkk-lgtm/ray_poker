@@ -8,6 +8,10 @@ export enum ClientSocketEvent {
   /** 入桌 / 断线重连：携带 roomId + playerId，服务端下发 sync_game_state */
   JoinRoom = 'join_room',
   SitDown = 'sit_down',
+  /** 已上桌玩家站起围观（回旁观，保留买入记录） */
+  StandUp = 'stand_up',
+  /** 已上桌玩家修改展示昵称 */
+  UpdateNickname = 'update_nickname',
   PlayerAction = 'player_action',
   RequestBuyIn = 'request_buy_in',
   AdminControl = 'admin_control',

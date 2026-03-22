@@ -10,6 +10,8 @@ import {
   type PlayerActionClientPayload,
   type RequestBuyInClientPayload,
   type SitDownClientPayload,
+  type StandUpClientPayload,
+  type UpdateNicknameClientPayload,
 } from './interfaces.js';
 import { pushMatchRecord } from '../http/matchHistoryStore.js';
 import { verifyPlayerSession } from '../auth/sessionStore.js';
@@ -17,36 +19,6 @@ import { ROOM_MAX_TABLE_PLAYERS, type Room } from './Room.js';
 import type { RoomManager } from './RoomManager.js';
 
 const stateSeqByRoom = new Map<string, number>();
-
-/** 单局结算弹窗展示时间，之后再自动开下一手 */
-const HAND_SETTLEMENT_AUTO_NEXT_MS = 4500;
-
-const autoNextHandTimers = new Map<string, ReturnType<typeof setTimeout>>();
-
-function cancelPendingAutoNextSchedule(roomId: string): void {
-  const t = autoNextHandTimers.get(roomId);
-  if (t !== undefined) {
-    clearTimeout(t);
-    autoNextHandTimers.delete(roomId);
-  }
-}
-
-function schedulePendingAutoNextHand(
-  io: Server,
-  roomManager: RoomManager,
-  roomId: string,
-): void {
-  cancelPendingAutoNextSchedule(roomId);
-  autoNextHandTimers.set(
-    roomId,
-    setTimeout(() => {
-      autoNextHandTimers.delete(roomId);
-      const room = roomManager.getRoom(roomId);
-      if (!room) return;
-      flushAutoNextHandEmits(io, room);
-    }, HAND_SETTLEMENT_AUTO_NEXT_MS),
-  );
-}
 
 function nextStateSeq(roomId: string): number {
   const n = (stateSeqByRoom.get(roomId) ?? 0) + 1;
@@ -82,13 +54,6 @@ export function emitSanitizedGameStateToRoom(io: Server, room: Room): void {
       ServerSocketEvent.GameStateUpdate,
       buildGameStateUpdatePayload(snapshot, playerId, seq, pres),
     );
-  }
-}
-
-/** 分池后自动续局：每开一手再推一帧快照 */
-function flushAutoNextHandEmits(io: Server, room: Room): void {
-  while (room.runAutoNextHandFromPending()) {
-    emitSanitizedGameStateToRoom(io, room);
   }
 }
 
@@ -174,13 +139,6 @@ function handleJoinRoom(
 
   emitSyncGameStateToSocket(io, room, payload.playerId);
   emitSanitizedGameStateToRoom(io, room);
-
-  if (isPlayerAtTable(room, payload.playerId)) {
-    if (room.tryAutoStartFirstHand()) {
-      emitSanitizedGameStateToRoom(io, room);
-    }
-    flushAutoNextHandEmits(io, room);
-  }
 }
 
 function handleDisconnect(io: Server, socket: Socket, roomManager: RoomManager): void {
@@ -235,11 +193,6 @@ export function mountSocketHandlers(io: Server, roomManager: RoomManager): void 
       try {
         room.handlePlayerAction(playerId, p.action, p.amount ?? 0);
         emitSanitizedGameStateToRoom(io, room);
-        if (room.hasPendingAutoStartNextHand()) {
-          schedulePendingAutoNextHand(io, roomManager, roomId);
-        } else {
-          flushAutoNextHandEmits(io, room);
-        }
       } catch (err) {
         socket.emit('player_action_error', {
           message: err instanceof Error ? err.message : 'ACTION_FAILED',
@@ -338,10 +291,55 @@ export function mountSocketHandlers(io: Server, roomManager: RoomManager): void 
         seatIndex: res.engineSeatIndex,
       });
       emitSanitizedGameStateToRoom(io, room);
-      if (room.tryAutoStartFirstHand()) {
-        emitSanitizedGameStateToRoom(io, room);
+    });
+
+    socket.on(ClientSocketEvent.StandUp, (raw: unknown) => {
+      const p = raw as StandUpClientPayload;
+      const { roomId, playerId } = socket.data;
+      if (!roomId || !playerId || p?.roomId !== roomId) return;
+      const room = roomManager.getRoom(roomId);
+      if (!room) return;
+
+      const res = room.standUpToLobby(playerId);
+      if (!res.ok) {
+        socket.emit('stand_up_ack', {
+          roomId,
+          ok: false,
+          message: res.reason,
+          playerId,
+        });
+        return;
       }
-      flushAutoNextHandEmits(io, room);
+
+      room.unbindPlayerSocket(playerId);
+      room.bindLobbySocket(playerId, socket.id);
+
+      socket.emit('stand_up_ack', {
+        roomId,
+        ok: true,
+        playerId,
+      });
+      emitSanitizedGameStateToRoom(io, room);
+    });
+
+    socket.on(ClientSocketEvent.UpdateNickname, (raw: unknown) => {
+      const p = raw as UpdateNicknameClientPayload;
+      const { roomId, playerId } = socket.data;
+      if (!roomId || !playerId || p?.roomId !== roomId) return;
+      const room = roomManager.getRoom(roomId);
+      if (!room) return;
+
+      const res = room.updatePlayerNickname(playerId, p.nickname);
+      if (!res.ok) {
+        socket.emit('update_nickname_ack', {
+          roomId,
+          ok: false,
+          message: res.reason,
+        });
+        return;
+      }
+      socket.emit('update_nickname_ack', { roomId, ok: true });
+      emitSanitizedGameStateToRoom(io, room);
     });
 
     socket.on(ClientSocketEvent.AdminControl, (raw: unknown) => {
@@ -375,7 +373,6 @@ export function mountSocketHandlers(io: Server, roomManager: RoomManager): void 
           break;
         }
         case 'close_room': {
-          cancelPendingAutoNextSchedule(roomId);
           const settlement = room.buildGameEndedSettlement();
           io.to(roomId).emit(ServerSocketEvent.GameEnded, settlement);
           pushMatchRecord({
@@ -399,12 +396,10 @@ export function mountSocketHandlers(io: Server, roomManager: RoomManager): void 
           break;
         }
         case 'start_hand': {
-          cancelPendingAutoNextSchedule(roomId);
           const res = room.hostRequestStartNextHand();
           socket.emit('admin_control_ack', { roomId, ok: res.ok, message: res.reason });
           if (res.ok) {
             emitSanitizedGameStateToRoom(io, room);
-            flushAutoNextHandEmits(io, room);
           }
           break;
         }

@@ -62,6 +62,8 @@ export interface Player {
  * `FINAL_HAND`：PRD 3.8 最后一手结束后的收尾阶段（例如强制亮牌、结算后解散前状态）。
  */
 export enum GameState {
+  /** 尚未发第一手；与 PreFlop（已发底牌且在下注中）区分，避免单人入座被误判为轮到行动 */
+  Idle = 'IDLE',
   PreFlop = 'PRE_FLOP',
   Flop = 'FLOP',
   Turn = 'TURN',

@@ -9,6 +9,8 @@ import type {
   RequestBuyInPayload,
   SanitizedGameState,
   SitDownPayload,
+  StandUpPayload,
+  UpdateNicknamePayload,
 } from '../types/game';
 import { mapJoinRoomError, mapPlayerActionError } from '../lib/socketMessages';
 import { SocketClientEvent, SocketServerEvent } from '../types/game';
@@ -21,6 +23,11 @@ export interface UseGameSocketOptions {
   autoConnect?: boolean;
   /** `sit_down_ack`：服务端返回 ok: false 时回调（例如座位已被占） */
   onSitDownAck?: (payload: {
+    roomId?: string;
+    ok?: boolean;
+    message?: string;
+  }) => void;
+  onStandUpAck?: (payload: {
     roomId?: string;
     ok?: boolean;
     message?: string;
@@ -64,6 +71,8 @@ export function useGameSocket(options: UseGameSocketOptions = {}) {
   const autoConnect = options.autoConnect !== false;
   const onSitDownAckRef = useRef(options.onSitDownAck);
   onSitDownAckRef.current = options.onSitDownAck;
+  const onStandUpAckRef = useRef(options.onStandUpAck);
+  onStandUpAckRef.current = options.onStandUpAck;
   const onRequestBuyInAckRef = useRef(options.onRequestBuyInAck);
   onRequestBuyInAckRef.current = options.onRequestBuyInAck;
   const onAdminControlAckRef = useRef(options.onAdminControlAck);
@@ -97,7 +106,8 @@ export function useGameSocket(options: UseGameSocketOptions = {}) {
     const s = socketRef.current;
     if (s) {
       s.removeAllListeners();
-      s.close();
+      // disconnect() 替代 close()；先 polling 再升级 ws，减少 Strict Mode 在 WS CONNECTING 阶段被 tear down 时的控制台噪音
+      s.disconnect();
       socketRef.current = null;
     }
     setSocket(null);
@@ -112,7 +122,8 @@ export function useGameSocket(options: UseGameSocketOptions = {}) {
     setConnectionStatus('connecting');
 
     const s = io(url, {
-      transports: ['websocket', 'polling'],
+      // 先 long-polling 再升级到 WebSocket，避免 dev 下 Strict Mode 极早 cleanup 时关掉尚未 open 的 raw WebSocket
+      transports: ['polling', 'websocket'],
       autoConnect: false,
     });
     socketRef.current = s;
@@ -178,6 +189,20 @@ export function useGameSocket(options: UseGameSocketOptions = {}) {
     s.on('sit_down_ack', (p: { roomId?: string; ok?: boolean; message?: string }) => {
       onSitDownAckRef.current?.(p);
     });
+    s.on('stand_up_ack', (p: { roomId?: string; ok?: boolean; message?: string }) => {
+      onStandUpAckRef.current?.(p);
+    });
+    s.on('update_nickname_ack', (p: { ok?: boolean; message?: string }) => {
+      if (p?.ok !== false) return;
+      const code = p.message ?? '';
+      const map: Record<string, string> = {
+        NOT_AT_TABLE: '你不在座位上，无法改名',
+        INVALID_NICKNAME: '昵称无效，请填写非空内容',
+      };
+      onSocketToastRef.current?.(
+        map[code] ?? (code ? `改名失败：${code}` : '改名失败'),
+      );
+    });
     s.on(SocketServerEvent.GameEnded, (p: GameEndedPayload) => {
       if (p?.roomId && Array.isArray(p.rows)) setGameEndedPayload(p);
     });
@@ -226,6 +251,14 @@ export function useGameSocket(options: UseGameSocketOptions = {}) {
     socketRef.current?.emit(SocketClientEvent.SitDown, payload);
   }, []);
 
+  const standUp = useCallback((payload: StandUpPayload) => {
+    socketRef.current?.emit(SocketClientEvent.StandUp, payload);
+  }, []);
+
+  const updateNickname = useCallback((payload: UpdateNicknamePayload) => {
+    socketRef.current?.emit(SocketClientEvent.UpdateNickname, payload);
+  }, []);
+
   const sendPlayerAction = useCallback((payload: PlayerActionPayload) => {
     socketRef.current?.emit(SocketClientEvent.PlayerAction, payload);
   }, []);
@@ -270,6 +303,8 @@ export function useGameSocket(options: UseGameSocketOptions = {}) {
     joinRoom,
     clearLastSocketError,
     sitDown,
+    standUp,
+    updateNickname,
     sendPlayerAction,
     requestBuyIn,
     sendAdminControl,

@@ -4,7 +4,7 @@ import {
   PokerEngine,
   splitPotWithOddChips,
 } from '../PokerEngine.js';
-import { PlayerStatus, Rank, Suit } from '../../types/poker.js';
+import { GameState, PlayerStatus, Rank, Suit } from '../../types/poker.js';
 import type { Card, Player } from '../../types/poker.js';
 
 const c = (rank: Rank, suit: Suit): Card => ({ rank, suit });
@@ -109,6 +109,28 @@ describe('PokerEngine.calculateSidePots', () => {
   });
 });
 
+describe('PokerEngine idle (before first deal)', () => {
+  it('单人入座仍为 IDLE，无当前行动位', () => {
+    const engine = new PokerEngine({
+      players: [
+        {
+          id: 'solo',
+          nickname: 'solo',
+          stack: 1000,
+          bet: 0,
+          status: PlayerStatus.Alive,
+          seatIndex: 3,
+        },
+      ],
+      dealerIndex: 0,
+      smallBlind: 1,
+      bigBlind: 2,
+    });
+    expect(engine.getGameState()).toBe(GameState.Idle);
+    expect(engine.getCurrentTurnPlayerId()).toBeNull();
+  });
+});
+
 describe('PokerEngine.dealPreFlop', () => {
   it('零筹码玩家不再保留上一手的 AllIn，避免下一手争池/行动位异常', () => {
     const engine = new PokerEngine({
@@ -150,6 +172,23 @@ describe('PokerEngine.dealPreFlop', () => {
   });
 });
 
+describe('PokerEngine.removePlayerFromTable', () => {
+  it('移除玩家后剩余玩家下标与庄家位仍合法', () => {
+    const engine = new PokerEngine({
+      players: [
+        { id: 'a', nickname: 'a', stack: 100, bet: 0, status: PlayerStatus.Alive, seatIndex: 0 },
+        { id: 'b', nickname: 'b', stack: 100, bet: 0, status: PlayerStatus.Alive, seatIndex: 1 },
+      ],
+      dealerIndex: 0,
+      smallBlind: 1,
+      bigBlind: 2,
+    });
+    engine.removePlayerFromTable('a');
+    expect(engine.getPlayers().map((p) => p.id)).toEqual(['b']);
+    expect(engine.getDealerIndex()).toBe(0);
+  });
+});
+
 describe('PokerEngine.movePlayerToSeat', () => {
   it('换座后庄家仍为同一玩家（按 id 校正下标）', () => {
     const engine = new PokerEngine({
@@ -166,6 +205,29 @@ describe('PokerEngine.movePlayerToSeat', () => {
     expect(dealer?.id).toBe('a');
     expect(engine.getPlayers().find((p) => p.id === 'a')?.seatIndex).toBe(9);
     expect(engine.getPlayers().find((p) => p.id === 'b')?.seatIndex).toBe(5);
+  });
+});
+
+describe('PokerEngine.setPlayerNickname', () => {
+  it('更新已入座玩家昵称', () => {
+    const engine = new PokerEngine({
+      players: [player('a', 100)],
+      dealerIndex: 0,
+      smallBlind: 1,
+      bigBlind: 2,
+    });
+    expect(engine.setPlayerNickname('a', '新名字')).toBe(true);
+    expect(engine.getPlayers().find((p) => p.id === 'a')?.nickname).toBe('新名字');
+  });
+
+  it('未知玩家返回 false', () => {
+    const engine = new PokerEngine({
+      players: [player('a', 100)],
+      dealerIndex: 0,
+      smallBlind: 1,
+      bigBlind: 2,
+    });
+    expect(engine.setPlayerNickname('ghost', 'x')).toBe(false);
   });
 });
 
@@ -243,5 +305,84 @@ describe('PokerEngine.distributePot', () => {
     expect(byPlayer.get('short')).toBe(150);
     expect(byPlayer.get('mid')).toBe(200);
     expect(byPlayer.get('deep')).toBe(50);
+  });
+
+  it('两人平分主池：公共牌成顺，双方均不提升牌力', () => {
+    const board: Card[] = [
+      c(Rank.Five, Suit.Spades),
+      c(Rank.Six, Suit.Hearts),
+      c(Rank.Seven, Suit.Diamonds),
+      c(Rank.Eight, Suit.Clubs),
+      c(Rank.Nine, Suit.Spades),
+    ];
+    const engine = new PokerEngine({ dealerIndex: 0, smallBlind: 1, bigBlind: 2 });
+    engine.hydrateShowdownState({
+      players: [
+        { ...player('x', 100), seatIndex: 0 },
+        { ...player('y', 100), seatIndex: 1 },
+      ],
+      dealerIndex: 0,
+      smallBlind: 1,
+      bigBlind: 2,
+      communityCards: board,
+      holeCards: new Map<string, readonly [Card, Card]>([
+        ['x', [c(Rank.Two, Suit.Clubs), c(Rank.Three, Suit.Clubs)]],
+        ['y', [c(Rank.Two, Suit.Diamonds), c(Rank.Four, Suit.Diamonds)]],
+      ]),
+      contributions: new Map([
+        ['x', 400],
+        ['y', 400],
+      ]),
+    });
+    const awards = engine.distributePot();
+    expect(awards.reduce((s, a) => s + a.amount, 0)).toBe(800);
+    const byPlayer = new Map<string, number>();
+    for (const a of awards) {
+      byPlayer.set(a.playerId, (byPlayer.get(a.playerId) ?? 0) + a.amount);
+    }
+    expect(byPlayer.get('x')).toBe(400);
+    expect(byPlayer.get('y')).toBe(400);
+    const players = (engine as unknown as { players: Player[] }).players;
+    expect(players.find((p) => p.id === 'x')!.stack).toBe(500);
+    expect(players.find((p) => p.id === 'y')!.stack).toBe(500);
+  });
+
+  it('分池前强制按贡献重算边池：避免沿用过期 this.pots（最后一笔跟注后先 settle 再广播）', () => {
+    const engine = new PokerEngine({ dealerIndex: 0, smallBlind: 1, bigBlind: 2 });
+    engine.hydrateShowdownState({
+      players: [
+        { ...player('x', 0, 0, PlayerStatus.AllIn), seatIndex: 0 },
+        { ...player('y', 0, 0, PlayerStatus.AllIn), seatIndex: 1 },
+      ],
+      dealerIndex: 0,
+      smallBlind: 1,
+      bigBlind: 2,
+      communityCards: royalBoard,
+      holeCards: new Map<string, readonly [Card, Card]>([
+        ['x', [c(Rank.Two, Suit.Clubs), c(Rank.Three, Suit.Diamonds)]],
+        ['y', [c(Rank.Two, Suit.Diamonds), c(Rank.Three, Suit.Hearts)]],
+      ]),
+      contributions: new Map([
+        ['x', 100],
+        ['y', 2],
+      ]),
+    });
+    engine.calculateSidePots();
+    const internal = engine as unknown as {
+      handContributionByPlayerId: Map<string, number>;
+    };
+    internal.handContributionByPlayerId.set('y', 100);
+
+    const awards = engine.distributePot();
+    expect(awards.reduce((s, a) => s + a.amount, 0)).toBe(200);
+    const byPlayer = new Map<string, number>();
+    for (const a of awards) {
+      byPlayer.set(a.playerId, (byPlayer.get(a.playerId) ?? 0) + a.amount);
+    }
+    expect(byPlayer.get('x')).toBe(100);
+    expect(byPlayer.get('y')).toBe(100);
+    const players = (engine as unknown as { players: Player[] }).players;
+    expect(players.find((p) => p.id === 'x')!.stack).toBe(100);
+    expect(players.find((p) => p.id === 'y')!.stack).toBe(100);
   });
 });

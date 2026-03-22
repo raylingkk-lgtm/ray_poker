@@ -1,0 +1,43 @@
+# 1. 依赖包 (Token 消耗大户)
+node_modules/
+**/node_modules/
+
+# 2. 编译产物 (AI 不需要看压缩后的 JS，只需看 src 里的 TS)
+dist/
+**/dist/
+build/
+.next/
+out/
+
+# 3. 包管理锁定文件 (pnpm-lock.yaml 通常有几万行，务必忽略)
+pnpm-lock.yaml
+package-lock.json
+yarn.lock
+
+# 4. 源码映射和类型定义产物 (避免冗余信息)
+*.map
+**/*.map
+# 如果你不需要 AI 专门处理构建生成的声明文件，可以取消注释下面一行
+# **/*.d.ts
+
+# 5. 环境配置文件和密钥 (安全+节省 Token)
+.env
+.env.*
+!.env.example
+
+# 6. Git 和系统文件
+.git/
+.DS_Store
+Thumbs.db
+
+# 7. 日志和临时文件
+*.log
+.cache/
+.pnpm-store/
+.vscode/
+
+# 8. 针对你项目的特定忽略
+# 你的前端 dist/assets 文件夹里有大量混淆后的 JS，必须排除
+frontend/dist/
+backend/dist/
+shared/dist/

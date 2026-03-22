@@ -138,7 +138,7 @@ export class PokerEngine {
   private currentHighestBet = 0;
   private smallBlind = 0;
   private bigBlind = 0;
-  private gameState: GameState = GameState.PreFlop;
+  private gameState: GameState = GameState.Idle;
   private pots: Pot[] = [];
   private holeCardsByPlayerId = new Map<string, readonly [Card, Card]>();
   /** 本手累计投入（用于边池） */
@@ -405,6 +405,9 @@ export class PokerEngine {
   }
 
   processAction(playerId: string, actionType: ActionType, amount: number): void {
+    if (this.gameState === GameState.Idle) {
+      throw new Error('PokerEngine.processAction: no hand in progress');
+    }
     const idx = this.players.findIndex((p) => p.id === playerId);
     if (idx < 0) throw new Error('PokerEngine.processAction: unknown player');
     if (idx !== this.currentTurnIndex) {
@@ -612,11 +615,12 @@ export class PokerEngine {
   }
 
   distributePot(): PotAward[] {
-    if (this.pots.length === 0) {
-      this.calculateSidePots();
-    }
+    // 必须与当前 handContribution 一致：上一拍 buildEngineSnapshot 可能已写入旧 this.pots，
+    // 最后一笔行动后先 settle 再广播，若此处不复算会用陈旧边池导致分池偏小、吞筹码。
+    this.calculateSidePots();
 
     const awards: PotAward[] = [];
+    let deadPotTotal = 0;
 
     for (const pot of this.pots) {
       if (pot.amount <= 0) continue;
@@ -626,7 +630,10 @@ export class PokerEngine {
         return pl && pl.status !== PlayerStatus.Folded && pl.status !== PlayerStatus.SittingOut;
       });
 
-      if (activeEligible.length === 0) continue;
+      if (activeEligible.length === 0) {
+        deadPotTotal += pot.amount;
+        continue;
+      }
 
       if (activeEligible.length === 1) {
         const winner = activeEligible[0]!;
@@ -648,7 +655,9 @@ export class PokerEngine {
         });
 
       const winnerIds = winningPlayerIdsFromHands(solved);
-      if (winnerIds.length === 0) continue;
+      if (winnerIds.length === 0) {
+        throw new Error('PokerEngine.distributePot: no winner after showdown (tie detection bug?)');
+      }
 
       const shares = splitPotWithOddChips(
         pot.amount,
@@ -664,6 +673,14 @@ export class PokerEngine {
           if (pl) pl.stack += amt;
         }
       }
+    }
+
+    const potGrandTotal = this.pots.reduce((s, p) => s + p.amount, 0);
+    const awardTotal = awards.reduce((s, a) => s + a.amount, 0);
+    if (awardTotal + deadPotTotal !== potGrandTotal) {
+      throw new Error(
+        `PokerEngine.distributePot: chips not conserved (awards ${awardTotal}, dead ${deadPotTotal}, pots ${potGrandTotal})`,
+      );
     }
 
     return awards;
@@ -721,7 +738,11 @@ export class PokerEngine {
    * 当前轮到表态的玩家（Alive）。Showdown / FinalHand / 全下无需再动筹码时为 null。
    */
   getCurrentTurnPlayerId(): string | null {
-    if (this.gameState === GameState.Showdown || this.gameState === GameState.FinalHand) {
+    if (
+      this.gameState === GameState.Idle ||
+      this.gameState === GameState.Showdown ||
+      this.gameState === GameState.FinalHand
+    ) {
       return null;
     }
     const p = this.players[this.currentTurnIndex];
@@ -767,6 +788,14 @@ export class PokerEngine {
     if (p) p.stack += delta;
   }
 
+  /** 仅更新展示昵称；不改变牌局状态机 */
+  setPlayerNickname(playerId: string, nickname: string): boolean {
+    const p = this.players.find((x) => x.id === playerId);
+    if (!p) return false;
+    p.nickname = nickname;
+    return true;
+  }
+
   /** 新玩家入座指定物理座位（0..9），按座位排序并校正庄家 / 行动位下标 */
   addPlayerAtSeat(player: Player, seat: number): void {
     if (seat < 0 || seat >= MAX_TABLE_SEATS) {
@@ -806,6 +835,52 @@ export class PokerEngine {
     this.players.push(p);
     this.sortPlayersBySeat();
     this.applySeatIndexSnapshot(snap);
+  }
+
+  /**
+   * 从座位移除玩家；仅用于「未开第一手」或 Showdown 已分池间隙（由 Room 校验）。
+   */
+  removePlayerFromTable(playerId: string): void {
+    const curIdx = this.players.findIndex((p) => p.id === playerId);
+    if (curIdx < 0) throw new Error('PokerEngine: unknown player');
+
+    const oldDealer = this.dealerIndex;
+    const oldTurn = this.currentTurnIndex;
+    const oldLag = this.lastAggressorIndex;
+    const oldBr = this.bettingRoundStartIndex;
+
+    this.players.splice(curIdx, 1);
+    this.holeCardsByPlayerId.delete(playerId);
+    this.handContributionByPlayerId.delete(playerId);
+    this.streetBetByPlayerId.delete(playerId);
+    this.actedSinceLastRaise.delete(playerId);
+
+    const n = this.players.length;
+    const adjust = (idx: number): number => {
+      if (idx < curIdx) return idx;
+      if (idx > curIdx) return idx - 1;
+      return Math.min(curIdx, Math.max(0, n - 1));
+    };
+
+    if (n === 0) {
+      this.dealerIndex = 0;
+      this.currentTurnIndex = 0;
+      this.lastAggressorIndex = null;
+      this.bettingRoundStartIndex = null;
+      this.gameState = GameState.Idle;
+      this.communityCards = [];
+      this.pots = [];
+      this.currentHighestBet = 0;
+      this.deck = [];
+      return;
+    }
+
+    this.dealerIndex = Math.max(0, Math.min(adjust(oldDealer), n - 1));
+    this.currentTurnIndex = Math.max(0, Math.min(adjust(oldTurn), n - 1));
+    this.lastAggressorIndex =
+      oldLag != null ? Math.max(0, Math.min(adjust(oldLag), n - 1)) : null;
+    this.bettingRoundStartIndex =
+      oldBr != null ? Math.max(0, Math.min(adjust(oldBr), n - 1)) : null;
   }
 }
 

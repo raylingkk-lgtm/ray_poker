@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
+import { totalPotAmount } from '../../lib/gameLabels';
 import type {
   PlayerActionPayload,
   SanitizedGameState,
@@ -47,28 +48,49 @@ function computeCustomBetRange(
   return { mode: 'RAISE', min: minRaiseTo, max: maxTotal };
 }
 
-type QuickKind = 'm2' | 'm3' | 'm4';
+type BetQuickKind = 'potThird' | 'potHalf';
 
-function quickActionPayload(
-  kind: QuickKind,
+/**
+ * 开池：1/3、1/2 池。pot 为当前桌上各池之和（含本街已下筹码）。
+ */
+function quickBetPotPayload(
+  kind: BetQuickKind,
   gs: SanitizedGameState,
   self: SanitizedPlayer,
   roomId: string,
 ): PlayerActionPayload | null {
-  const bb = gs.bigBlind;
   const high = deriveHighestBet(gs);
+  if (high !== 0) return null;
+
+  const pot = totalPotAmount(gs.pots);
+  const bb = gs.bigBlind;
+  const minRaiseTo = deriveMinRaiseTo(gs, high);
+  const stack = self.stack;
+  const fraction = kind === 'potThird' ? 1 / 3 : 1 / 2;
+  const minOpen = Math.max(minRaiseTo, bb * 2);
+  const fromPot = Math.round(pot * fraction);
+  const amount = Math.min(stack, Math.max(minOpen, Math.max(bb, fromPot)));
+  if (stack < bb) return null;
+  if (amount < minOpen) return null;
+  return { roomId, action: 'BET', amount };
+}
+
+/**
+ * 面对注：目标总注 = 当前街最高注 × 倍数，夹在 minRaiseTo 与可下上限之间。
+ */
+function quickRaiseMultiplierPayload(
+  mult: 2 | 3,
+  gs: SanitizedGameState,
+  self: SanitizedPlayer,
+  roomId: string,
+): PlayerActionPayload | null {
+  const high = deriveHighestBet(gs);
+  if (high === 0) return null;
+
   const minRaiseTo = deriveMinRaiseTo(gs, high);
   const street = self.bet;
   const stack = self.stack;
   const maxTotal = street + stack;
-  const mult = kind === 'm2' ? 2 : kind === 'm3' ? 3 : 4;
-
-  if (high === 0) {
-    const raw = mult * bb;
-    const amount = Math.min(stack, Math.max(bb, raw));
-    if (stack < bb) return null;
-    return { roomId, action: 'BET', amount };
-  }
 
   if (maxTotal <= high) return null;
 
@@ -76,11 +98,9 @@ function quickActionPayload(
     return { roomId, action: 'ALL_IN' };
   }
 
-  const idealTotal = mult * high;
-  const targetTotal = Math.min(
-    maxTotal,
-    Math.max(minRaiseTo, idealTotal),
-  );
+  let targetTotal = Math.round(high * mult);
+  targetTotal = Math.max(targetTotal, minRaiseTo);
+  targetTotal = Math.min(targetTotal, maxTotal);
 
   if (targetTotal <= high) {
     return { roomId, action: 'ALL_IN' };
@@ -89,20 +109,14 @@ function quickActionPayload(
   return { roomId, action: 'RAISE', amount: targetTotal };
 }
 
-/** 将 2×/3×/4× 预设映射为滑块目标金额（总注）；All-in 用 max */
-function presetSliderAmount(
-  kind: QuickKind,
-  gs: SanitizedGameState,
-  self: SanitizedPlayer,
-  roomId: string,
+function sliderAmountFromPayload(
+  p: PlayerActionPayload | null,
   customRange: { min: number; max: number } | null,
 ): number | null {
-  const p = quickActionPayload(kind, gs, self, roomId);
-  if (!p) return null;
-  if (p.action === 'ALL_IN') return customRange?.max ?? null;
+  if (!p || !customRange) return null;
+  if (p.action === 'ALL_IN') return customRange.max;
   if (p.action === 'BET' || p.action === 'RAISE') {
     const v = p.amount ?? 0;
-    if (!customRange) return null;
     return Math.min(customRange.max, Math.max(customRange.min, v));
   }
   return null;
@@ -163,16 +177,32 @@ export function ActionPanel({
   const canFold = canAct;
 
   const quick = useMemo(() => {
-    if (!gameState || !selfPlayer || !canAct || !betting) {
-      return { m2: null, m3: null, m4: null, allIn: true } as const;
+    if (!gameState || !selfPlayer || !canAct || !betting || !customRange) {
+      return {
+        potThird: null,
+        potHalf: null,
+        raise2x: null,
+        raise3x: null,
+        allIn: true,
+      } as const;
+    }
+    if (customRange.mode === 'BET') {
+      return {
+        potThird: quickBetPotPayload('potThird', gameState, selfPlayer, roomId),
+        potHalf: quickBetPotPayload('potHalf', gameState, selfPlayer, roomId),
+        raise2x: null,
+        raise3x: null,
+        allIn: selfPlayer.stack > 0,
+      } as const;
     }
     return {
-      m2: quickActionPayload('m2', gameState, selfPlayer, roomId),
-      m3: quickActionPayload('m3', gameState, selfPlayer, roomId),
-      m4: quickActionPayload('m4', gameState, selfPlayer, roomId),
+      potThird: null,
+      potHalf: null,
+      raise2x: quickRaiseMultiplierPayload(2, gameState, selfPlayer, roomId),
+      raise3x: quickRaiseMultiplierPayload(3, gameState, selfPlayer, roomId),
       allIn: selfPlayer.stack > 0,
-    };
-  }, [gameState, selfPlayer, canAct, betting, roomId]);
+    } as const;
+  }, [gameState, selfPlayer, canAct, betting, customRange, roomId]);
 
   const submitCustomAmount = () => {
     if (!customRange) return;
@@ -191,15 +221,14 @@ export function ActionPanel({
     onPlayerAction({ roomId, action: 'RAISE', amount: v });
   };
 
-  const applyPreset = (kind: QuickKind) => {
+  const applyPreset = (kind: BetQuickKind | 'raise2x' | 'raise3x') => {
     if (!gameState || !selfPlayer || !customRange) return;
-    const v = presetSliderAmount(
-      kind,
-      gameState,
-      selfPlayer,
-      roomId,
-      customRange,
-    );
+    let p: PlayerActionPayload | null = null;
+    if (kind === 'potThird') p = quick.potThird;
+    else if (kind === 'potHalf') p = quick.potHalf;
+    else if (kind === 'raise2x') p = quick.raise2x;
+    else p = quick.raise3x;
+    const v = sliderAmountFromPayload(p, customRange);
     if (v != null) setSliderVal(v);
   };
 
@@ -216,10 +245,22 @@ export function ActionPanel({
     );
   }
 
+  if (gameState.gameState === 'IDLE') {
+    return (
+      <div className="shrink-0 border-t border-white/10 bg-black/40 px-3 py-3">
+        <p className="text-center text-xs text-white/50">
+          尚未开局；请房主在菜单中点击「开始 / 下一手牌」。
+        </p>
+      </div>
+    );
+  }
+
   if (noBettingPhase) {
     return (
       <div className="shrink-0 border-t border-white/10 bg-black/40 px-3 py-3">
-        <p className="text-center text-xs text-white/50">本手已结束，等待下一手</p>
+        <p className="text-center text-xs text-white/50">
+          本手已结束；满足条件时约 10 秒后自动发下一手。
+        </p>
       </div>
     );
   }
@@ -290,9 +331,28 @@ export function ActionPanel({
               className="h-2 w-full cursor-pointer appearance-none rounded-full bg-white/10 accent-emerald-500"
             />
             <div className="flex flex-wrap items-stretch justify-center gap-1.5">
-              {(['m2', 'm3', 'm4'] as const).map((k) => {
-                const payload = quick[k];
-                const mult = k === 'm2' ? 2 : k === 'm3' ? 3 : 4;
+              {(customRange.mode === 'BET'
+                ? (
+                    [
+                      ['potThird', '1/3 池'] as const,
+                      ['potHalf', '1/2 池'] as const,
+                    ] as const
+                  )
+                : (
+                    [
+                      ['raise2x', '2×'] as const,
+                      ['raise3x', '3×'] as const,
+                    ] as const
+                  )
+              ).map(([k, label]) => {
+                const payload =
+                  k === 'potThird'
+                    ? quick.potThird
+                    : k === 'potHalf'
+                      ? quick.potHalf
+                      : k === 'raise2x'
+                        ? quick.raise2x
+                        : quick.raise3x;
                 const disabled = !payload;
                 return (
                   <button
@@ -302,12 +362,12 @@ export function ActionPanel({
                     title={
                       disabled
                         ? '筹码不足或未达到最小加注'
-                        : `Set slider to ${mult}× preset`
+                        : `将滑块设为${label}对应金额`
                     }
-                    className="min-w-[3rem] rounded-lg border border-white/35 bg-transparent px-2 py-2 text-xs font-semibold text-white/90 disabled:cursor-not-allowed disabled:opacity-35 hover:enabled:border-white/55 hover:enabled:bg-white/5"
+                    className="min-w-[3.25rem] rounded-lg border border-white/35 bg-transparent px-2 py-2 text-xs font-semibold text-white/90 disabled:cursor-not-allowed disabled:opacity-35 hover:enabled:border-white/55 hover:enabled:bg-white/5"
                     onClick={() => applyPreset(k)}
                   >
-                    {mult}×
+                    {label}
                   </button>
                 );
               })}

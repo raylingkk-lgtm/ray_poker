@@ -48,10 +48,24 @@ export interface HandPotAwardView {
   amount: number;
 }
 
+/** 结算弹窗：每位上桌玩家摊牌信息（弃牌不亮底牌） */
+export interface SettlementPlayerView {
+  playerId: string;
+  nickname: string;
+  folded: boolean;
+  holeCards: readonly [Card, Card] | null;
+  /** 公共牌满 5 张且未弃牌时可比牌时的成牌描述 */
+  handDescription?: string;
+}
+
 export interface LastHandSettlementView {
   /** 已结束的这一手序号（与房间 `handsDealtCount` 一致） */
   handNumber: number;
   awards: readonly HandPotAwardView[];
+  /** 结束时公共牌（弹窗自包含） */
+  communityCards: readonly Card[];
+  /** 本手上桌玩家亮牌/弃牌状态 */
+  settlementPlayers: readonly SettlementPlayerView[];
 }
 
 export interface SanitizedGameState {
@@ -158,6 +172,30 @@ export interface SitDownServerAckPayload {
   message?: string;
 }
 
+/** `stand_up`：站起围观（回大厅连接，保留买入统计） */
+export interface StandUpClientPayload {
+  roomId: string;
+}
+
+export interface StandUpServerAckPayload {
+  roomId: string;
+  ok: boolean;
+  playerId?: string;
+  message?: string;
+}
+
+/** `update_nickname`：已上桌玩家修改展示名 */
+export interface UpdateNicknameClientPayload {
+  roomId: string;
+  nickname: string;
+}
+
+export interface UpdateNicknameServerAckPayload {
+  roomId: string;
+  ok: boolean;
+  message?: string;
+}
+
 /**
  * `player_action`：声明行动（PRD §3.3：Check 仅当当前最高下注等于本街已投入；否则 Call/Fold/Raise/All-in）。
  * 具体合法性由服务端引擎校验。
@@ -255,6 +293,17 @@ function cloneLastHandSettlement(s: LastHandSettlementView): LastHandSettlementV
   return {
     handNumber: s.handNumber,
     awards: s.awards.map((a) => ({ ...a })),
+    communityCards: s.communityCards.map(cloneCard),
+    settlementPlayers: s.settlementPlayers.map((p) => ({
+      playerId: p.playerId,
+      nickname: p.nickname,
+      folded: p.folded,
+      holeCards:
+        p.holeCards && p.holeCards.length === 2
+          ? [cloneCard(p.holeCards[0]), cloneCard(p.holeCards[1])]
+          : null,
+      handDescription: p.handDescription,
+    })),
   };
 }
 

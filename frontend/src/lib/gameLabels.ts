@@ -1,6 +1,7 @@
 import type { PokerGamePhase } from '../types/game';
 
 const PHASE_LABELS: Record<PokerGamePhase, string> = {
+  IDLE: '未开局',
   PRE_FLOP: 'Pre-flop',
   FLOP: 'Flop',
   TURN: 'Turn',

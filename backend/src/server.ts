@@ -5,7 +5,10 @@ import { networkInterfaces } from 'node:os';
 import { Server } from 'socket.io';
 import { GamePhase } from '@ray-poker/shared';
 import { mountApiRoutes } from './http/apiRoutes.js';
-import { mountSocketHandlers } from './socket/handler.js';
+import {
+  emitSanitizedGameStateToRoom,
+  mountSocketHandlers,
+} from './socket/handler.js';
 import { RoomManager } from './socket/RoomManager.js';
 
 /**
@@ -47,6 +50,9 @@ const io = new Server(httpServer, {
 });
 
 const roomManager = new RoomManager();
+roomManager.registerRoomStateBroadcaster((room) =>
+  emitSanitizedGameStateToRoom(io, room),
+);
 mountApiRoutes(app, roomManager);
 mountSocketHandlers(io, roomManager);
 

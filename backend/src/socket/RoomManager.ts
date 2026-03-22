@@ -11,10 +11,16 @@ export type RoomCreateHooks = {
 export class RoomManager {
   private readonly rooms = new Map<string, Room>();
   private hostTransferHandler?: (e: HostTransferredEvent) => void;
+  private roomStateBroadcaster?: (room: Room) => void;
 
   /** 全局房主变更通知（例如向房间广播 `admin_changed`） */
   registerHostTransferredHandler(handler: (e: HostTransferredEvent) => void): void {
     this.hostTransferHandler = handler;
+  }
+
+  /** 牌局状态变更后广播（托管超时、自动下一手等不经 socket handler 的路径） */
+  registerRoomStateBroadcaster(fn: (room: Room) => void): void {
+    this.roomStateBroadcaster = fn;
   }
 
   createRoom(opts: RoomCreateOptions, hooks?: RoomCreateHooks): Room {
@@ -26,6 +32,9 @@ export class RoomManager {
       onHostTransferred: (e) => {
         hooks?.onHostTransferred?.(e);
         this.hostTransferHandler?.(e);
+      },
+      onRoomStateChanged: (r) => {
+        this.roomStateBroadcaster?.(r);
       },
     });
     this.rooms.set(opts.roomId, room);
