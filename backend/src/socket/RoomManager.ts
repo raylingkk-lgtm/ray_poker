@@ -48,4 +48,9 @@ export class RoomManager {
   listRoomIds(): string[] {
     return [...this.rooms.keys()];
   }
+
+  /** 进行中房间摘要（供 GET /api/rooms） */
+  listActiveRoomSummaries(): ReturnType<Room['getListingSummary']>[] {
+    return [...this.rooms.values()].map((room) => room.getListingSummary());
+  }
 }

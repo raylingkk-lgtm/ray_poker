@@ -11,6 +11,8 @@ import {
   type RequestBuyInClientPayload,
   type SitDownClientPayload,
 } from './interfaces.js';
+import { pushMatchRecord } from '../http/matchHistoryStore.js';
+import { verifyPlayerSession } from '../auth/sessionStore.js';
 import { ROOM_MAX_TABLE_PLAYERS, type Room } from './Room.js';
 import type { RoomManager } from './RoomManager.js';
 
@@ -113,8 +115,13 @@ function handleJoinRoom(
   raw: unknown,
 ): void {
   const payload = raw as JoinRoomClientPayload;
-  if (!payload?.roomId || !payload?.playerId) {
+  if (!payload?.roomId || !payload?.playerId || !payload?.authToken) {
     socket.emit('join_room_error', { message: 'INVALID_PAYLOAD' });
+    return;
+  }
+
+  if (!verifyPlayerSession(payload.playerId, payload.authToken)) {
+    socket.emit('join_room_error', { message: 'AUTH_INVALID' });
     return;
   }
 
@@ -122,6 +129,37 @@ function handleJoinRoom(
   if (!room) {
     socket.emit('join_room_error', { message: 'ROOM_NOT_FOUND' });
     return;
+  }
+
+  const pw =
+    payload.playerId === room.hostPlayerId
+      ? ('ok' as const)
+      : room.checkJoinPassword(payload.roomPassword);
+  if (pw === 'required') {
+    socket.emit('join_room_error', { message: 'ROOM_PASSWORD_REQUIRED' });
+    return;
+  }
+  if (pw === 'invalid') {
+    socket.emit('join_room_error', { message: 'ROOM_PASSWORD_INVALID' });
+    return;
+  }
+
+  const prevRoomId = socket.data.roomId as string | undefined;
+  const prevPlayerId = socket.data.playerId as string | undefined;
+  if (
+    prevRoomId &&
+    prevRoomId !== payload.roomId &&
+    prevPlayerId === payload.playerId
+  ) {
+    const oldRoom = roomManager.getRoom(prevRoomId);
+    if (oldRoom) {
+      if (oldRoom.isLobbyPlayer(payload.playerId)) {
+        oldRoom.handleLobbyDisconnect(payload.playerId);
+      } else {
+        oldRoom.handlePlayerDisconnect(payload.playerId);
+      }
+    }
+    void socket.leave(prevRoomId);
   }
 
   socket.data.roomId = payload.roomId;
@@ -340,6 +378,10 @@ export function mountSocketHandlers(io: Server, roomManager: RoomManager): void 
           cancelPendingAutoNextSchedule(roomId);
           const settlement = room.buildGameEndedSettlement();
           io.to(roomId).emit(ServerSocketEvent.GameEnded, settlement);
+          pushMatchRecord({
+            roomId: settlement.roomId,
+            rows: settlement.rows,
+          });
           socket.emit('admin_control_ack', { roomId, ok: true });
           stateSeqByRoom.delete(roomId);
           roomManager.removeRoom(roomId);
@@ -364,6 +406,24 @@ export function mountSocketHandlers(io: Server, roomManager: RoomManager): void 
             emitSanitizedGameStateToRoom(io, room);
             flushAutoNextHandEmits(io, room);
           }
+          break;
+        }
+        case 'set_room_password': {
+          if (typeof p.newRoomPassword !== 'string') {
+            socket.emit('admin_control_ack', {
+              roomId,
+              ok: false,
+              message: 'MISSING_NEW_ROOM_PASSWORD',
+            });
+            break;
+          }
+          const res = room.setJoinPassword(p.newRoomPassword);
+          socket.emit('admin_control_ack', {
+            roomId,
+            ok: res.ok,
+            message: res.ok ? undefined : res.reason,
+          });
+          if (res.ok) emitSanitizedGameStateToRoom(io, room);
           break;
         }
         default:

@@ -73,6 +73,14 @@ export interface SanitizedGameState {
   pendingBuyIns: readonly PendingBuyInView[];
   /** 上一手分池结果；新开下一手后为 `null` */
   lastHandSettlement: LastHandSettlementView | null;
+  /** 已完成发牌开局次数；0 表示尚未发第一手 */
+  handsDealtCount?: number;
+  /** 当前行动位托管截止时间（Unix 毫秒）；无倒计时为 `null` */
+  actionDeadlineAt?: number | null;
+  /** 房间展示名（大厅列表） */
+  roomDisplayName: string;
+  /** 进房密码版本；房主改密后递增，供客户端失效本地缓存 */
+  joinPasswordRevision: number;
   players: readonly SanitizedPlayer[];
 }
 
@@ -103,15 +111,24 @@ export interface EngineGameStateSnapshot {
   hostPlayerId: string;
   pendingBuyIns: readonly PendingBuyInView[];
   lastHandSettlement: LastHandSettlementView | null;
+  /** 与房间 `handsDealtCount` 一致 */
+  handsDealtCount: number;
+  /** 当前行动位托管截止时间（Unix 毫秒）；无行动计时为 `null` */
+  actionDeadlineAt: number | null;
+  roomDisplayName: string;
+  joinPasswordRevision: number;
   players: readonly EngineGameStatePlayerSnapshot[];
 }
 
 // --- 客户端 → 服务端 ---
 
-/** `join_room`：会话绑定（含重连） */
+/** `join_room`：会话绑定（含重连）；`authToken` 须与 `playerId` 在服务端登记一致 */
 export interface JoinRoomClientPayload {
   roomId: string;
   playerId: string;
+  authToken: string;
+  /** 有进房密码的房间必填（或重试时传入） */
+  roomPassword?: string;
 }
 
 /** `admin_changed`：房主继承 */
@@ -183,7 +200,9 @@ export type AdminControlCommand =
   | 'approve_buy_in'
   | 'reject_buy_in'
   /** 房主：开始第一手（若尚未开局）或上一手已结算后的下一手 */
-  | 'start_hand';
+  | 'start_hand'
+  /** 房主：设置或清除进房密码；`newRoomPassword` 空串表示清除 */
+  | 'set_room_password';
 
 export interface AdminControlClientPayload {
   roomId: string;
@@ -193,6 +212,8 @@ export interface AdminControlClientPayload {
   reason?: string;
   /** 买入审批：`approve_buy_in` / `reject_buy_in` 必填 */
   requestId?: string;
+  /** `set_room_password`：新密码；省略或空串表示清除进房密码 */
+  newRoomPassword?: string;
 }
 
 export interface AdminControlServerAckPayload {
@@ -302,6 +323,10 @@ export function sanitizeGameState(
     lastHandSettlement: engineState.lastHandSettlement
       ? cloneLastHandSettlement(engineState.lastHandSettlement)
       : null,
+    handsDealtCount: engineState.handsDealtCount,
+    actionDeadlineAt: engineState.actionDeadlineAt,
+    roomDisplayName: engineState.roomDisplayName,
+    joinPasswordRevision: engineState.joinPasswordRevision,
     players,
   };
 }

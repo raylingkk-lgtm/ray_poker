@@ -135,6 +135,10 @@ export function PokerTable({
             currentTurnId &&
             currentTurnId === occupant.id
           );
+          const actionDeadlineAt =
+            isActing && gameState?.actionDeadlineAt != null
+              ? gameState.actionDeadlineAt
+              : null;
 
           return (
             <Seat
@@ -147,6 +151,7 @@ export function PokerTable({
               isActing={isActing}
               gamePhase={phase}
               emptySeatAction={emptySeatAction}
+              actionDeadlineAt={actionDeadlineAt}
               onSitDown={onSitDown}
               onSeatOccupied={onSeatOccupied}
             />

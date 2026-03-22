@@ -29,6 +29,10 @@ function baseSnapshot(phase: GameState): EngineGameStateSnapshot {
     hostPlayerId: 'host',
     pendingBuyIns: [],
     lastHandSettlement: null,
+    handsDealtCount: 1,
+    actionDeadlineAt: null,
+    roomDisplayName: 'Test',
+    joinPasswordRevision: 0,
     players: [
       {
         id: 'a',

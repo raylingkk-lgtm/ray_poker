@@ -110,10 +110,6 @@ function sbBbIndices(numPlayers: number, dealerIndex: number): { sb: number; bb:
   };
 }
 
-function firstPreflopActorIndex(numPlayers: number, bbIndex: number): number {
-  return (bbIndex + 1) % numPlayers;
-}
-
 function nextActiveIndex(players: Player[], from: number): number {
   const n = players.length;
   for (let k = 1; k <= n; k++) {
@@ -342,6 +338,9 @@ export class PokerEngine {
       p.bet = 0;
       if (p.stack > 0) {
         p.status = PlayerStatus.Alive;
+      } else {
+        // 上一手可能为 AllIn；0 筹码本手不参与，避免仍被算进争池/行动位指向无手牌玩家导致分池异常或死循环
+        p.status = PlayerStatus.Folded;
       }
     }
 
@@ -379,13 +378,30 @@ export class PokerEngine {
     );
 
     this.gameState = GameState.PreFlop;
-    this.bettingRoundStartIndex = firstPreflopActorIndex(this.players.length, bb);
+    this.bettingRoundStartIndex = this.firstPreflopActingIndex(bb);
     this.currentTurnIndex = this.bettingRoundStartIndex;
 
-    const first = this.players[this.currentTurnIndex]!;
-    if (first.status === PlayerStatus.Folded || first.status === PlayerStatus.SittingOut) {
-      this.currentTurnIndex = nextActiveIndex(this.players, this.currentTurnIndex);
+    // 全员已下盲即全下等：无待表态位时连续推进至发完公共牌或进入下一街
+    for (let guard = 0; guard < 8; guard++) {
+      if (this.getGameState() === GameState.Showdown) break;
+      if (!this.isBettingRoundComplete()) break;
+      this.advanceAfterBettingRound();
     }
+  }
+
+  /** 第一手行动位：须已发底牌且仍可表态（跳过上手遗留的 AllIn / 无筹码位） */
+  private firstPreflopActingIndex(bbIndex: number): number {
+    const n = this.players.length;
+    const utg = (bbIndex + 1) % n;
+    for (let k = 0; k < n; k++) {
+      const i = (utg + k) % n;
+      const p = this.players[i]!;
+      if (p.status === PlayerStatus.SittingOut || p.status === PlayerStatus.Folded) continue;
+      if (!this.holeCardsByPlayerId.has(p.id)) continue;
+      if (p.status === PlayerStatus.AllIn) continue;
+      return i;
+    }
+    return utg;
   }
 
   processAction(playerId: string, actionType: ActionType, amount: number): void {

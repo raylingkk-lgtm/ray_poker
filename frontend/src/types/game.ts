@@ -69,6 +69,12 @@ export interface SanitizedGameState {
   /** 仅房主收到非空 */
   pendingBuyIns?: readonly PendingBuyInView[];
   lastHandSettlement?: LastHandSettlementView | null;
+  /** 已开局次数；0 表示尚未发第一手 */
+  handsDealtCount?: number;
+  /** 当前行动位托管截止 Unix 毫秒；无则 null */
+  actionDeadlineAt?: number | null;
+  roomDisplayName?: string;
+  joinPasswordRevision?: number;
   players: readonly SanitizedPlayer[];
 }
 
@@ -109,9 +115,30 @@ export interface GameEndedPayload {
   rows: readonly SettlementRow[];
 }
 
+/** GET /api/rooms 单项 */
+export interface RoomListingItem {
+  roomId: string;
+  displayName: string;
+  seatedCount: number;
+  hasPassword: boolean;
+  joinPasswordRevision: number;
+  smallBlind: number;
+  bigBlind: number;
+}
+
+/** GET /api/match-history 单项 */
+export interface MatchHistoryRecord {
+  id: string;
+  endedAt: number;
+  roomId: string;
+  rows: readonly SettlementRow[];
+}
+
 export interface JoinRoomPayload {
   roomId: string;
   playerId: string;
+  authToken: string;
+  roomPassword?: string;
 }
 
 export interface SitDownPayload {

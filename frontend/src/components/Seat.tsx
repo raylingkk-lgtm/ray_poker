@@ -45,25 +45,34 @@ function PlayingCardFace({ card, small }: { card: GameCard; small?: boolean }) {
 function ActingRing({
   active,
   startedAt,
+  deadlineAt,
 }: {
   active: boolean;
   startedAt: number | null;
+  deadlineAt: number | null;
 }) {
   const [, setTick] = useState(0);
 
   useEffect(() => {
-    if (!active || !startedAt) return;
+    if (!active) return;
     const id = window.setInterval(() => setTick((n) => n + 1), 100);
     return () => window.clearInterval(id);
-  }, [active, startedAt]);
+  }, [active]);
 
-  if (!active || !startedAt) return null;
+  if (!active) return null;
 
-  const elapsed = Date.now() - startedAt;
-  const remaining = Math.max(0, ACTING_DURATION_MS - elapsed);
-  const frac = remaining / ACTING_DURATION_MS;
+  let remaining: number;
+  if (deadlineAt != null) {
+    remaining = Math.max(0, deadlineAt - Date.now());
+  } else if (startedAt != null) {
+    remaining = Math.max(0, ACTING_DURATION_MS - (Date.now() - startedAt));
+  } else {
+    remaining = ACTING_DURATION_MS;
+  }
+  const frac = Math.min(1, Math.max(0, remaining / ACTING_DURATION_MS));
   const dash = RING_C * frac;
   const urgent = remaining <= 10_000;
+  const sec = Math.ceil(remaining / 1000);
 
   const strokeColor = urgent
     ? '#f87171'
@@ -72,33 +81,41 @@ function ActingRing({
       : '#34d399';
 
   return (
-    <svg
-      className={`pointer-events-none absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 ${urgent ? 'animate-pulse' : ''}`}
-      width={88}
-      height={88}
-      aria-hidden
+    <div
+      className="pointer-events-none absolute inset-0 z-[1] flex flex-col items-center justify-center"
+      aria-live="polite"
     >
-      <circle
-        cx={44}
-        cy={44}
-        r={RING_R}
-        fill="none"
-        stroke="rgba(255,255,255,0.12)"
-        strokeWidth={RING_STROKE}
-      />
-      <circle
-        cx={44}
-        cy={44}
-        r={RING_R}
-        fill="none"
-        stroke={strokeColor}
-        strokeWidth={RING_STROKE}
-        strokeLinecap="round"
-        strokeDasharray={`${dash} ${RING_C}`}
-        transform="rotate(-90 44 44)"
-        style={{ transition: 'stroke 0.2s ease' }}
-      />
-    </svg>
+      <svg
+        className={urgent ? 'animate-pulse' : ''}
+        width={88}
+        height={88}
+        aria-hidden
+      >
+        <circle
+          cx={44}
+          cy={44}
+          r={RING_R}
+          fill="none"
+          stroke="rgba(255,255,255,0.12)"
+          strokeWidth={RING_STROKE}
+        />
+        <circle
+          cx={44}
+          cy={44}
+          r={RING_R}
+          fill="none"
+          stroke={strokeColor}
+          strokeWidth={RING_STROKE}
+          strokeLinecap="round"
+          strokeDasharray={`${dash} ${RING_C}`}
+          transform="rotate(-90 44 44)"
+          style={{ transition: 'stroke 0.2s ease' }}
+        />
+      </svg>
+      <span className="-mt-1 text-[10px] font-semibold tabular-nums text-white/90">
+        {sec}s
+      </span>
+    </div>
   );
 }
 
@@ -113,6 +130,8 @@ export interface SeatProps {
   gamePhase: PokerGamePhase | null;
   /** 空位时可执行：入座或换座 */
   emptySeatAction?: 'sit' | 'move';
+  /** 服务端行动截止时间（与托管一致）；无则仅靠本地 60s 估算 */
+  actionDeadlineAt: number | null;
   onSitDown: (seatIndex: number) => void;
   onSeatOccupied: () => void;
 }
@@ -126,6 +145,7 @@ export function Seat({
   isActing,
   gamePhase,
   emptySeatAction,
+  actionDeadlineAt,
   onSitDown,
   onSeatOccupied,
 }: SeatProps) {
@@ -188,43 +208,54 @@ export function Seat({
           isActing ? 'drop-shadow-[0_0_12px_rgba(52,211,153,0.85)]' : ''
         }`}
       >
-        <ActingRing active={isActing} startedAt={actingStartedAt} />
-
-        <div className="relative">
-          {occupant ? (
-            <>
-              <div
-                className={`flex h-12 w-12 items-center justify-center rounded-full border-2 text-lg font-bold shadow-lg sm:h-14 sm:w-14 ${
-                  isActing
-                    ? 'border-emerald-400 bg-emerald-900/80 ring-2 ring-emerald-400/60'
-                    : 'border-white/25 bg-gradient-to-br from-slate-600 to-slate-800'
-                }`}
-              >
-                {initial}
-              </div>
-              {isDealer ? (
-                <span
-                  className="absolute -bottom-0.5 -right-0.5 flex h-5 w-5 items-center justify-center rounded-full border border-amber-200 bg-amber-500 text-[10px] font-black text-amber-950 shadow"
-                  title="庄家"
+        <div
+          className={`relative flex shrink-0 items-center justify-center ${
+            isActing
+              ? 'h-[5.5rem] w-[5.5rem] sm:h-[5.75rem] sm:w-[5.75rem]'
+              : ''
+          }`}
+        >
+          <ActingRing
+            active={isActing}
+            startedAt={actingStartedAt}
+            deadlineAt={actionDeadlineAt}
+          />
+          <div className="relative z-[2]">
+            {occupant ? (
+              <>
+                <div
+                  className={`flex h-12 w-12 items-center justify-center rounded-full border-2 text-lg font-bold shadow-lg sm:h-14 sm:w-14 ${
+                    isActing
+                      ? 'border-emerald-400 bg-emerald-900/80 ring-2 ring-emerald-400/60'
+                      : 'border-white/25 bg-gradient-to-br from-slate-600 to-slate-800'
+                  }`}
                 >
-                  D
-                </span>
-              ) : null}
-            </>
-          ) : emptySeatAction ? (
-            <button
-              type="button"
-              onClick={handleSitClick}
-              className="rounded-full border border-dashed border-emerald-400/50 bg-emerald-950/40 px-2 py-2 text-[10px] font-medium text-emerald-200/90 hover:bg-emerald-900/50 sm:text-xs"
-            >
-              {emptySeatAction === 'move' ? '换座' : '坐下'}
-            </button>
-          ) : (
-            <div
-              className="flex h-12 w-12 items-center justify-center rounded-full border border-white/10 bg-black/20 sm:h-14 sm:w-14"
-              aria-hidden
-            />
-          )}
+                  {initial}
+                </div>
+                {isDealer ? (
+                  <span
+                    className="absolute -bottom-0.5 -right-0.5 flex h-5 w-5 items-center justify-center rounded-full border border-amber-200 bg-amber-500 text-[10px] font-black text-amber-950 shadow"
+                    title="庄家"
+                  >
+                    D
+                  </span>
+                ) : null}
+              </>
+            ) : emptySeatAction ? (
+              <button
+                type="button"
+                onClick={handleSitClick}
+                className="rounded-full border border-dashed border-emerald-400/50 bg-emerald-950/40 px-2 py-2 text-[10px] font-medium text-emerald-200/90 hover:bg-emerald-900/50 sm:text-xs"
+              >
+                {emptySeatAction === 'move' ? '换座' : '坐下'}
+              </button>
+            ) : (
+              <div
+                className="flex h-12 w-12 items-center justify-center rounded-full border border-white/10 bg-black/20 sm:h-14 sm:w-14"
+                aria-hidden
+              />
+            )}
+          </div>
         </div>
 
         {occupant ? (
@@ -235,7 +266,9 @@ export function Seat({
             <div className="font-mono text-[10px] text-amber-200/90 sm:text-[11px]">
               {occupant.stack}
             </div>
-            {occupant.status === 'FOLDED' ? (
+            {occupant.status === 'FOLDED' && occupant.stack === 0 ? (
+              <span className="text-[9px] text-amber-300/90">等待买入</span>
+            ) : occupant.status === 'FOLDED' ? (
               <span className="text-[9px] text-red-400/80">已弃牌</span>
             ) : null}
             <div className="flex gap-0.5">

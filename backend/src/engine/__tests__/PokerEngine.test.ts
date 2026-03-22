@@ -109,6 +109,47 @@ describe('PokerEngine.calculateSidePots', () => {
   });
 });
 
+describe('PokerEngine.dealPreFlop', () => {
+  it('零筹码玩家不再保留上一手的 AllIn，避免下一手争池/行动位异常', () => {
+    const engine = new PokerEngine({
+      players: [
+        {
+          id: 'busted',
+          nickname: 'busted',
+          stack: 0,
+          bet: 0,
+          status: PlayerStatus.AllIn,
+          seatIndex: 0,
+        },
+        {
+          id: 'p1',
+          nickname: 'p1',
+          stack: 1000,
+          bet: 0,
+          status: PlayerStatus.Alive,
+          seatIndex: 1,
+        },
+        {
+          id: 'p2',
+          nickname: 'p2',
+          stack: 1000,
+          bet: 0,
+          status: PlayerStatus.Alive,
+          seatIndex: 2,
+        },
+      ],
+      dealerIndex: 0,
+      smallBlind: 1,
+      bigBlind: 2,
+    });
+    engine.dealPreFlop();
+    const busted = engine.getPlayers().find((p) => p.id === 'busted');
+    expect(busted?.status).toBe(PlayerStatus.Folded);
+    expect(engine.getHoleCardsForPlayer('busted')).toBeUndefined();
+    expect(engine.getGameState()).toBeDefined();
+  });
+});
+
 describe('PokerEngine.movePlayerToSeat', () => {
   it('换座后庄家仍为同一玩家（按 id 校正下标）', () => {
     const engine = new PokerEngine({

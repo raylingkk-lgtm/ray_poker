@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { hashRoomPassword, verifyRoomPassword } from '../auth/roomPassword.js';
 import { PokerEngine } from '../engine/PokerEngine.js';
 import type { Player } from '../types/poker.js';
 import { ActionType, GameState, PlayerStatus } from '../types/poker.js';
@@ -24,6 +25,11 @@ export interface RoomCreateOptions {
   initialPlayers?: Player[];
   /** 观战入座默认带入（未传 `sit_down.stack` 时使用） */
   defaultStartingStack?: number;
+  /** 进房密码（与 `joinPasswordHash` 成对；不设则公开进房） */
+  joinPasswordSalt?: string;
+  joinPasswordHash?: string;
+  /** 大厅与桌上房主昵称展示；缺省由 API 生成 */
+  displayName?: string;
 }
 
 export interface PendingBuyInRequest {
@@ -66,6 +72,8 @@ export class Room {
   /** PRD §3.8：最后一手阶段内拒绝新买入（已排队待审的仍可由房主处理） */
   private isFinalHand = false;
   private actionTimer: ReturnType<typeof setTimeout> | null = null;
+  /** 与 `ROOM_ACTION_TIMEOUT_MS` 对齐，供前端倒计时 */
+  private actionDeadlineAtMs: number | null = null;
   private hostTransferTimer: ReturnType<typeof setTimeout> | null = null;
   private handPotDistributed = false;
   /** 分池完成后待自动开下一手（至少两人在线时由 handler 消费） */
@@ -75,6 +83,10 @@ export class Room {
   /** 已成功发牌开局的次数（0 = 尚未开过第一手） */
   private handsDealtCount = 0;
   private readonly onHostTransferred?: (e: HostTransferredEvent) => void;
+  private joinPwdSalt?: string;
+  private joinPwdHash?: string;
+  private joinPasswordRevision: number;
+  private roomDisplayName: string;
 
   constructor(
     opts: RoomCreateOptions & { onHostTransferred?: (e: HostTransferredEvent) => void },
@@ -82,6 +94,14 @@ export class Room {
     this.roomId = opts.roomId;
     this._hostPlayerId = opts.hostPlayerId;
     this.defaultStartingStack = opts.defaultStartingStack ?? 1000;
+    this.joinPwdSalt = opts.joinPasswordSalt;
+    this.joinPwdHash = opts.joinPasswordHash;
+    this.joinPasswordRevision =
+      opts.joinPasswordSalt && opts.joinPasswordHash ? 1 : 0;
+    this.roomDisplayName =
+      typeof opts.displayName === 'string' && opts.displayName.trim().length > 0
+        ? opts.displayName.trim()
+        : `房间${opts.roomId.slice(-4)}`;
     this.onHostTransferred = opts.onHostTransferred;
     this.engine = new PokerEngine({
       players: opts.initialPlayers ?? [],
@@ -101,6 +121,64 @@ export class Room {
 
   get hostPlayerId(): string {
     return this._hostPlayerId;
+  }
+
+  getDisplayName(): string {
+    return this.roomDisplayName;
+  }
+
+  /**
+   * 房主：修改或清除进房密码。每次变更递增 `joinPasswordRevision`。
+   */
+  setJoinPassword(plain: string | undefined): { ok: true } | { ok: false; reason: string } {
+    const MAX_PASSWORD_LEN = 128;
+    const trimmed = typeof plain === 'string' ? plain.trim() : '';
+    if (trimmed === '') {
+      this.joinPwdSalt = undefined;
+      this.joinPwdHash = undefined;
+      this.joinPasswordRevision += 1;
+      return { ok: true };
+    }
+    if (trimmed.length > MAX_PASSWORD_LEN) {
+      return { ok: false, reason: 'PASSWORD_TOO_LONG' };
+    }
+    const h = hashRoomPassword(trimmed);
+    this.joinPwdSalt = h.salt;
+    this.joinPwdHash = h.hash;
+    this.joinPasswordRevision += 1;
+    return { ok: true };
+  }
+
+  /** 大厅列表用：不含敏感信息 */
+  getListingSummary(): {
+    roomId: string;
+    displayName: string;
+    seatedCount: number;
+    hasPassword: boolean;
+    joinPasswordRevision: number;
+    smallBlind: number;
+    bigBlind: number;
+  } {
+    return {
+      roomId: this.roomId,
+      displayName: this.roomDisplayName,
+      seatedCount: this.engine.getPlayers().length,
+      hasPassword: Boolean(this.joinPwdSalt && this.joinPwdHash),
+      joinPasswordRevision: this.joinPasswordRevision,
+      smallBlind: this.engine.getSmallBlind(),
+      bigBlind: this.engine.getBigBlind(),
+    };
+  }
+
+  /**
+   * 校验进房密码：`ok` 可进；`required` 需客户端补密码；`invalid` 密码错误。
+   */
+  checkJoinPassword(plain?: string): 'ok' | 'required' | 'invalid' {
+    if (!this.joinPwdSalt || !this.joinPwdHash) return 'ok';
+    if (plain === undefined || plain === '') return 'required';
+    return verifyRoomPassword(plain, this.joinPwdSalt, this.joinPwdHash)
+      ? 'ok'
+      : 'invalid';
   }
 
   get finalHandActive(): boolean {
@@ -469,6 +547,10 @@ export class Room {
     if (seated.length < 2) {
       throw new Error('Room.startNextHand: need at least 2 seated players');
     }
+    const withChips = seated.filter((p) => p.stack > 0);
+    if (withChips.length < 2) {
+      throw new Error('Room.startNextHand: need at least 2 players with chips');
+    }
     this.applyApprovedBuyInsToStacks();
     this.handPotDistributed = false;
     if (!this.isFinalHand && this.handsDealtCount >= 1) {
@@ -524,8 +606,10 @@ export class Room {
     if (!actor) return;
     if (!this.isPlayerConnected(actor)) return;
     this.clearActionTimer();
+    this.actionDeadlineAtMs = Date.now() + ROOM_ACTION_TIMEOUT_MS;
     this.actionTimer = setTimeout(() => {
       this.actionTimer = null;
+      this.actionDeadlineAtMs = null;
       this.onActionDeadline(actor);
     }, ROOM_ACTION_TIMEOUT_MS);
   }
@@ -555,6 +639,7 @@ export class Room {
       clearTimeout(this.actionTimer);
       this.actionTimer = null;
     }
+    this.actionDeadlineAtMs = null;
   }
 
   buildEngineSnapshot(): EngineGameStateSnapshot {
@@ -583,6 +668,10 @@ export class Room {
       hostPlayerId: this._hostPlayerId,
       pendingBuyIns: this.pendingBuyIns.map((r) => ({ ...r })),
       lastHandSettlement: this.lastHandSettlement,
+      handsDealtCount: this.handsDealtCount,
+      actionDeadlineAt: this.actionDeadlineAtMs,
+      roomDisplayName: this.roomDisplayName,
+      joinPasswordRevision: this.joinPasswordRevision,
       players,
     };
   }

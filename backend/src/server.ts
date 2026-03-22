@@ -1,11 +1,12 @@
+import cors from 'cors';
 import express from 'express';
 import { createServer } from 'node:http';
 import { networkInterfaces } from 'node:os';
 import { Server } from 'socket.io';
 import { GamePhase } from '@ray-poker/shared';
+import { mountApiRoutes } from './http/apiRoutes.js';
 import { mountSocketHandlers } from './socket/handler.js';
 import { RoomManager } from './socket/RoomManager.js';
-import { PlayerStatus } from './types/poker.js';
 
 /**
  * 生产环境设置 `CORS_ORIGINS=https://你的前端域名,https://备用域名`；
@@ -24,6 +25,12 @@ function socketIoCorsOrigin(): boolean | string | string[] {
 }
 
 const app = express();
+app.use(
+  cors({
+    origin: socketIoCorsOrigin(),
+    credentials: true,
+  }),
+);
 app.use(express.json());
 
 app.get('/health', (_req, res) => {
@@ -40,25 +47,8 @@ const io = new Server(httpServer, {
 });
 
 const roomManager = new RoomManager();
+mountApiRoutes(app, roomManager);
 mountSocketHandlers(io, roomManager);
-
-/** 开发用示例桌：房主预入座；好友用 `?player=guest-1` 进房观战，点「坐下」加入引擎 */
-roomManager.createRoom({
-  roomId: 'demo',
-  hostPlayerId: 'host-1',
-  smallBlind: 1,
-  bigBlind: 2,
-  initialPlayers: [
-    {
-      id: 'host-1',
-      nickname: 'Host',
-      stack: 1000,
-      bet: 0,
-      status: PlayerStatus.Alive,
-      seatIndex: 0,
-    },
-  ],
-});
 
 const port = Number(process.env.PORT) || 3001;
 const host = process.env.HOST ?? '0.0.0.0';

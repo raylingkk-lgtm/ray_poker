@@ -11,11 +11,14 @@
   },
   "dependencies": {
     "@ray-poker/shared": "workspace:*",
+    "cors": "^2.8.6",
     "express": "^4.21.2",
+    "nanoid": "^5.1.7",
     "pokersolver": "^2.1.4",
     "socket.io": "^4.8.1"
   },
   "devDependencies": {
+    "@types/cors": "^2.8.19",
     "@types/express": "^4.17.21",
     "@types/node": "^22.10.2",
     "tsx": "^4.19.2",

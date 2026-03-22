@@ -10,6 +10,7 @@ import type {
   SanitizedGameState,
   SitDownPayload,
 } from '../types/game';
+import { mapJoinRoomError, mapPlayerActionError } from '../lib/socketMessages';
 import { SocketClientEvent, SocketServerEvent } from '../types/game';
 
 const defaultUrl = import.meta.env.VITE_SOCKET_URL ?? 'http://localhost:3001';
@@ -37,6 +38,10 @@ export interface UseGameSocketOptions {
     ok?: boolean;
     message?: string;
   }) => void;
+  /** `join_room_error` 为 AUTH_INVALID 时（如服务端重启丢会话）重新签发身份 */
+  onAuthInvalid?: () => Promise<void>;
+  /** 进房失败、行动错误、连接失败等玩家提示（中文） */
+  onSocketToast?: (message: string) => void;
 }
 
 export interface GameStateUpdatePayload {
@@ -63,6 +68,10 @@ export function useGameSocket(options: UseGameSocketOptions = {}) {
   onRequestBuyInAckRef.current = options.onRequestBuyInAck;
   const onAdminControlAckRef = useRef(options.onAdminControlAck);
   onAdminControlAckRef.current = options.onAdminControlAck;
+  const onAuthInvalidRef = useRef(options.onAuthInvalid);
+  onAuthInvalidRef.current = options.onAuthInvalid;
+  const onSocketToastRef = useRef(options.onSocketToast);
+  onSocketToastRef.current = options.onSocketToast;
 
   const socketRef = useRef<Socket | null>(null);
   const [socket, setSocket] = useState<Socket | null>(null);
@@ -112,7 +121,13 @@ export function useGameSocket(options: UseGameSocketOptions = {}) {
     const onDisconnect = () => setConnectionStatus('disconnected');
     const onError = (err: unknown) => {
       setConnectionStatus('error');
-      setLastSocketError(err instanceof Error ? err.message : 'CONNECT_ERROR');
+      const raw = err instanceof Error ? err.message : 'CONNECT_ERROR';
+      setLastSocketError(raw);
+      onSocketToastRef.current?.(
+        err instanceof Error
+          ? `无法连接：${err.message}`
+          : '无法连接服务器，请检查网络与 VITE_SOCKET_URL',
+      );
     };
 
     const onGameStateUpdate = (payload: GameStateUpdatePayload) => {
@@ -137,10 +152,28 @@ export function useGameSocket(options: UseGameSocketOptions = {}) {
     s.on(SocketServerEvent.SyncGameState, onSyncGameState);
     s.on(SocketServerEvent.AdminChanged, onAdminChanged);
     s.on('join_room_error', (p: { message?: string }) => {
-      setLastSocketError(p?.message ?? 'JOIN_ROOM_FAILED');
+      const code = p?.message ?? 'JOIN_ROOM_FAILED';
+      if (code === 'AUTH_INVALID' && onAuthInvalidRef.current) {
+        void onAuthInvalidRef.current();
+        return;
+      }
+      if (code !== 'ROOM_PASSWORD_REQUIRED') {
+        onSocketToastRef.current?.(mapJoinRoomError(code));
+      }
+      if (
+        code === 'ROOM_PASSWORD_REQUIRED' ||
+        code === 'ROOM_PASSWORD_INVALID' ||
+        code === 'ROOM_NOT_FOUND'
+      ) {
+        setLastSocketError(code);
+      } else {
+        setLastSocketError(null);
+      }
     });
     s.on('player_action_error', (p: { message?: string }) => {
-      setLastSocketError(p?.message ?? 'ACTION_FAILED');
+      onSocketToastRef.current?.(
+        mapPlayerActionError(p?.message ?? 'ACTION_FAILED'),
+      );
     });
     s.on('sit_down_ack', (p: { roomId?: string; ok?: boolean; message?: string }) => {
       onSitDownAckRef.current?.(p);
@@ -163,9 +196,6 @@ export function useGameSocket(options: UseGameSocketOptions = {}) {
       'admin_control_ack',
       (p: { roomId?: string; ok?: boolean; message?: string }) => {
         onAdminControlAckRef.current?.(p);
-        if (p?.ok === false) {
-          setLastSocketError(p.message ?? 'ADMIN_CONTROL_FAILED');
-        }
       },
     );
 
@@ -180,8 +210,11 @@ export function useGameSocket(options: UseGameSocketOptions = {}) {
     return () => disconnect();
   }, [autoConnect, connect, disconnect]);
 
+  const clearLastSocketError = useCallback(() => setLastSocketError(null), []);
+
   const joinRoom = useCallback(
     (payload: JoinRoomPayload) => {
+      setLastSocketError(null);
       setSelfPlayerId(payload.playerId);
       const s = socketRef.current ?? connect();
       s.emit(SocketClientEvent.JoinRoom, payload);
@@ -209,6 +242,7 @@ export function useGameSocket(options: UseGameSocketOptions = {}) {
       value?: number;
       reason?: string;
       requestId?: string;
+      newRoomPassword?: string;
     }) => {
       socketRef.current?.emit(SocketClientEvent.AdminControl, payload);
     },
@@ -234,6 +268,7 @@ export function useGameSocket(options: UseGameSocketOptions = {}) {
     connect,
     disconnect,
     joinRoom,
+    clearLastSocketError,
     sitDown,
     sendPlayerAction,
     requestBuyIn,

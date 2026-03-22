@@ -25,7 +25,6 @@ function deriveMinRaiseTo(gs: SanitizedGameState, high: number): number {
   return Math.max(high + bb, high * 2);
 }
 
-/** 滑轨：开池最小 2×大盲；面对注时最小为合法加注目标（通常 ≥ 当前最高注的 2 倍口径由 minRaiseTo 保证） */
 function computeCustomBetRange(
   gs: SanitizedGameState,
   self: SanitizedPlayer,
@@ -88,6 +87,25 @@ function quickActionPayload(
   }
 
   return { roomId, action: 'RAISE', amount: targetTotal };
+}
+
+/** 将 2×/3×/4× 预设映射为滑块目标金额（总注）；All-in 用 max */
+function presetSliderAmount(
+  kind: QuickKind,
+  gs: SanitizedGameState,
+  self: SanitizedPlayer,
+  roomId: string,
+  customRange: { min: number; max: number } | null,
+): number | null {
+  const p = quickActionPayload(kind, gs, self, roomId);
+  if (!p) return null;
+  if (p.action === 'ALL_IN') return customRange?.max ?? null;
+  if (p.action === 'BET' || p.action === 'RAISE') {
+    const v = p.amount ?? 0;
+    if (!customRange) return null;
+    return Math.min(customRange.max, Math.max(customRange.min, v));
+  }
+  return null;
 }
 
 export function ActionPanel({
@@ -173,6 +191,23 @@ export function ActionPanel({
     onPlayerAction({ roomId, action: 'RAISE', amount: v });
   };
 
+  const applyPreset = (kind: QuickKind) => {
+    if (!gameState || !selfPlayer || !customRange) return;
+    const v = presetSliderAmount(
+      kind,
+      gameState,
+      selfPlayer,
+      roomId,
+      customRange,
+    );
+    if (v != null) setSliderVal(v);
+  };
+
+  const applyAllInPreset = () => {
+    if (!customRange || !quick.allIn) return;
+    setSliderVal(customRange.max);
+  };
+
   if (!gameState || !selfPlayer) {
     return (
       <div className="shrink-0 border-t border-white/10 bg-black/40 px-3 py-3">
@@ -197,79 +232,48 @@ export function ActionPanel({
     );
   }
 
-  const labelPrefix = betting && betting.high === 0 ? '下注' : '加注至';
+  const primaryBetLabel =
+    customRange?.mode === 'BET' ? `Bet ${sliderVal}` : `Raise to ${sliderVal}`;
 
   return (
     <div className="shrink-0 border-t border-white/10 bg-black/50 px-2 py-2">
       <div className="mx-auto flex max-w-lg flex-col gap-2">
-        <div className="flex flex-wrap justify-center gap-1.5">
+        <div className="flex flex-wrap justify-center gap-2">
           {canFold ? (
             <button
               type="button"
-              className="min-w-[4.25rem] rounded-lg border border-red-500/40 bg-red-950/50 px-2 py-2 text-sm font-medium text-red-100 hover:bg-red-900/40"
+              className="min-w-[4.25rem] rounded-lg bg-red-600 px-3 py-2.5 text-sm font-semibold text-white shadow hover:bg-red-500"
               onClick={() => onPlayerAction({ roomId, action: 'FOLD' })}
             >
-              弃牌
+              Fold
             </button>
           ) : null}
           {canCheck ? (
             <button
               type="button"
-              className="min-w-[4.25rem] rounded-lg border border-white/20 bg-white/10 px-2 py-2 text-sm font-medium text-white hover:bg-white/15"
+              className="min-w-[4.25rem] rounded-lg bg-slate-600 px-3 py-2.5 text-sm font-semibold text-white shadow hover:bg-slate-500"
               onClick={() => onPlayerAction({ roomId, action: 'CHECK' })}
             >
-              看牌
+              Check
             </button>
           ) : null}
           {canCall && toCall > 0 ? (
             <button
               type="button"
-              className="min-w-[4.25rem] rounded-lg border border-amber-500/35 bg-amber-950/40 px-2 py-2 text-sm font-medium text-amber-100 hover:bg-amber-900/35"
+              className="min-w-[4.25rem] rounded-lg bg-amber-500 px-3 py-2.5 text-sm font-semibold text-white shadow hover:bg-amber-400"
               onClick={() => onPlayerAction({ roomId, action: 'CALL' })}
             >
-              跟注 {toCall}
+              Call {toCall}
             </button>
           ) : null}
         </div>
 
-        <div className="flex flex-wrap justify-center gap-1.5">
-          {(['m2', 'm3', 'm4'] as const).map((k) => {
-            const payload = quick[k];
-            const mult = k === 'm2' ? 2 : k === 'm3' ? 3 : 4;
-            const disabled = !payload;
-            return (
-              <button
-                key={k}
-                type="button"
-                disabled={disabled}
-                title={
-                  disabled
-                    ? '筹码不足或未达到最小加注'
-                    : `${labelPrefix} ${mult}×`
-                }
-                className="min-w-[3.5rem] rounded-lg border border-emerald-500/30 bg-emerald-950/35 px-2 py-1.5 text-xs font-semibold text-emerald-100 disabled:cursor-not-allowed disabled:opacity-35 hover:enabled:bg-emerald-900/35"
-                onClick={() => payload && onPlayerAction(payload)}
-              >
-                {mult}×
-              </button>
-            );
-          })}
-          <button
-            type="button"
-            disabled={!quick.allIn}
-            className="min-w-[3.5rem] rounded-lg border border-rose-400/35 bg-rose-950/40 px-2 py-1.5 text-xs font-semibold text-rose-100 disabled:opacity-35 hover:enabled:bg-rose-900/35"
-            onClick={() => onPlayerAction({ roomId, action: 'ALL_IN' })}
-          >
-            All-in
-          </button>
-        </div>
-
         {customRange && betting ? (
-          <div className="space-y-1.5 rounded-lg border border-emerald-500/20 bg-emerald-950/20 px-2 py-2">
+          <div className="space-y-2 rounded-lg border border-emerald-500/25 bg-emerald-950/25 px-2 py-2">
             <div className="flex items-center justify-between gap-2 text-[10px] text-white/55">
               <span>
-                自定义{customRange.mode === 'BET' ? '下注' : '加注至'}（最小{' '}
-                {customRange.min}，最大全下 {customRange.max}）
+                {customRange.mode === 'BET' ? 'Bet' : 'Raise to'}（{customRange.min}{' '}
+                – {customRange.max}）
               </span>
               <span className="shrink-0 font-mono text-sm font-semibold text-emerald-300">
                 {sliderVal}
@@ -281,19 +285,57 @@ export function ActionPanel({
               max={customRange.max}
               step={1}
               value={sliderVal}
-              aria-label="自定义下注额度"
+              aria-label="Bet or raise amount"
               onChange={(e) => setSliderVal(Number(e.target.value))}
               className="h-2 w-full cursor-pointer appearance-none rounded-full bg-white/10 accent-emerald-500"
             />
+            <div className="flex flex-wrap items-stretch justify-center gap-1.5">
+              {(['m2', 'm3', 'm4'] as const).map((k) => {
+                const payload = quick[k];
+                const mult = k === 'm2' ? 2 : k === 'm3' ? 3 : 4;
+                const disabled = !payload;
+                return (
+                  <button
+                    key={k}
+                    type="button"
+                    disabled={disabled}
+                    title={
+                      disabled
+                        ? '筹码不足或未达到最小加注'
+                        : `Set slider to ${mult}× preset`
+                    }
+                    className="min-w-[3rem] rounded-lg border border-white/35 bg-transparent px-2 py-2 text-xs font-semibold text-white/90 disabled:cursor-not-allowed disabled:opacity-35 hover:enabled:border-white/55 hover:enabled:bg-white/5"
+                    onClick={() => applyPreset(k)}
+                  >
+                    {mult}×
+                  </button>
+                );
+              })}
+              <button
+                type="button"
+                disabled={!quick.allIn}
+                className="min-w-[3.25rem] rounded-lg border border-rose-400/50 bg-transparent px-2 py-2 text-xs font-semibold text-rose-100/90 disabled:opacity-35 hover:enabled:border-rose-300/70 hover:enabled:bg-rose-500/10"
+                onClick={() => applyAllInPreset()}
+              >
+                All-in
+              </button>
+              <button
+                type="button"
+                className="min-w-[6.5rem] flex-1 rounded-lg bg-emerald-600 px-3 py-2 text-xs font-bold text-white shadow hover:bg-emerald-500 sm:min-w-[8rem]"
+                onClick={() => submitCustomAmount()}
+              >
+                {primaryBetLabel}
+              </button>
+            </div>
+          </div>
+        ) : quick.allIn ? (
+          <div className="flex justify-center">
             <button
               type="button"
-              className="w-full rounded-lg border border-emerald-500/40 bg-emerald-800/40 py-2 text-xs font-semibold text-emerald-50 hover:bg-emerald-700/45"
-              onClick={submitCustomAmount}
+              className="rounded-lg border border-rose-400/50 bg-transparent px-4 py-2 text-xs font-semibold text-rose-100/90 hover:bg-rose-500/10"
+              onClick={() => onPlayerAction({ roomId, action: 'ALL_IN' })}
             >
-              使用 {sliderVal} 筹码
-              {customRange.mode === 'RAISE' && sliderVal >= customRange.max
-                ? '（全下）'
-                : ''}
+              All-in
             </button>
           </div>
         ) : null}
