@@ -82,7 +82,11 @@ importers:
         specifier: ^5.4.11
         version: 5.4.21(@types/node@22.19.15)
 
-  shared: {}
+  shared:
+    devDependencies:
+      typescript:
+        specifier: ~5.6.3
+        version: 5.6.3
 
 packages:
 

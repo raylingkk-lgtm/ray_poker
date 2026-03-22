@@ -1,5 +1,6 @@
 node_modules
 dist
+.pnpm-store/
 *.local
 .DS_Store
 .env

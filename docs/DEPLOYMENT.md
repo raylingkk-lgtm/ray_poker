@@ -24,12 +24,26 @@
 
 ### 构建与启动
 
+本仓库为 monorepo，需先编译 **`@ray-poker/shared`**（产出 `shared/dist`），再编译 backend。在**仓库根目录**：
+
 ```bash
-cd backend
 pnpm install
-pnpm run build
-NODE_ENV=production PORT=3001 CORS_ORIGINS=https://poker.example.com node dist/server.js
+pnpm run build:backend
+NODE_ENV=production PORT=3001 CORS_ORIGINS=https://poker.example.com pnpm --filter backend start
 ```
+
+（仅调试也可 `cd backend && node dist/server.js`，但须已执行过 `pnpm run build:backend`。）
+
+#### Render 等 PaaS（勿使用 `corepack enable`）
+
+构建环境对 `/usr/bin` 只读时，`corepack enable` 会失败。可用 **npx** 调用 pnpm，并走根目录脚本：
+
+| 项 | 值 |
+|----|-----|
+| **Root Directory** | 空（仓库根） |
+| **Build Command** | `npx --yes pnpm@9 install && npx --yes pnpm@9 run build:backend` |
+| **Start Command** | `npx --yes pnpm@9 --filter backend start` |
+| **NODE_VERSION** | `20` 或 `22`（避免过新的主版本） |
 
 生产建议用 **systemd** 或 **pm2** 保活，前面 **Nginx** 终止 TLS 并反代到 `127.0.0.1:3001`。
 
@@ -69,11 +83,14 @@ server {
 
 构建时把 Socket 地址写成**用户浏览器可访问的公网 origin**（与页面是否同域无关，但必须可达且协议一致：页面是 https 时应用 **wss**）。
 
+在**仓库根目录**（会先编 `shared` 再编前端）：
+
 ```bash
-cd frontend
 pnpm install
-VITE_SOCKET_URL=https://api.poker.example.com pnpm run build
+VITE_SOCKET_URL=https://api.poker.example.com pnpm run build:frontend
 ```
+
+Vercel 等：`Build Command` 可用 `pnpm run build:frontend`，`Output Directory` 为 `frontend/dist`。
 
 将 `frontend/dist` 部署到任意静态托管（Nginx `root`、Vercel、Cloudflare Pages、S3+CloudFront 等）。若前端与 API **同域不同路径**（例如 `/` 与 `/socket.io/`），可把 `VITE_SOCKET_URL` 设为与页面相同 origin，并在 Nginx 里把 `/socket.io/` 反代到 Node。
 
